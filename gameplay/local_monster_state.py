@@ -256,11 +256,11 @@ SPAWN_AREA_DENSITY_SCALE = max(
 # Whole-map cap on the density-driven population.  768 was the historical
 # value; the live packed-map maps (a0303, a0203, a0302, a0406) all sat exactly
 # on it, and so do most large maps: their authored density asks for thousands.
-# 162 is a quarter of the previous 650, so the big, cap-bound maps carry four
-# times fewer generated monsters; maps already under it are unchanged, and
-# hand-placed spawn points (bosses, champions) are not counted against it.
+# 120 keeps the big, cap-bound maps sparse (650 before, then 162); maps already
+# under it are unchanged, and hand-placed spawn points (bosses, champions) are
+# not counted against it.
 SPAWN_AREA_MAX_TOTAL_MONSTERS = max(
-    0, int(os.environ.get("DSO_SPAWN_AREA_MAX_TOTAL_MONSTERS", "162"))
+    0, int(os.environ.get("DSO_SPAWN_AREA_MAX_TOTAL_MONSTERS", "120"))
 )
 
 # Spawn-list membership is server-owned and is not shipped in static.db4.
