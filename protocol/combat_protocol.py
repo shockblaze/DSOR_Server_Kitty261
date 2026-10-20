@@ -44,12 +44,14 @@ KILL_COMMAND = command_id("Commands::KillCommand", 0x006C)
 # it; captured payloads that do carry it still round-trip.
 SKILL_COMMAND_DERIVED_FLAG: bool | None = None
 
-# DSO_SKILL_HIT_MARKER_BITS=1: the release261_192 client's layout (the xm1rth
-# fork's), which always carries the skill inheritance marker and the Hit
-# tag-boundary bit. Off, both are written only when a value carries them, the
-# layout this server and the DSOR client (crates/proto combat.rs) use.
+# On by default: the release261_192 client this server targets (the xm1rth
+# fork's) always reads the skill inheritance marker and the Hit tag-boundary
+# bit; without them it logs "invalid command ending in multi command 71/107" and
+# the misread actor ids and positions end in a matrix44 assertion.
+# DSO_SKILL_HIT_MARKER_BITS=0 writes both only when a value carries them, the
+# layout of dro_client64-patch5 and the DSOR client (crates/proto combat.rs).
 SKILL_HIT_MARKER_BITS = os.getenv(
-    "DSO_SKILL_HIT_MARKER_BITS", "0"
+    "DSO_SKILL_HIT_MARKER_BITS", "1"
 ).strip().lower() in {"1", "true", "yes"}
 
 # One owner ``MoveCommand`` followed by one summon ``SustainedSkillCommand``.
