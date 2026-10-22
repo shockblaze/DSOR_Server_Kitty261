@@ -30,6 +30,28 @@ _FORTRESS_GRIMMAG_MAP = "a0005_start_fortress_dun"
 _FORTRESS_GRIMMAG_TEMPLATE = "a0005_champion_grimmag_01_q_waytogrimmagstone_03"
 _FORTRESS_GRIMMAG_VISIBILITY_ENTER_RADIUS = MONSTER_VISIBILITY_ENTER_RADIUS
 _FORTRESS_GRIMMAG_VISIBILITY_EXIT_RADIUS = 85.0
+_SMALL_CRYPT_MAP = "a0008_crypt_dun"
+_SMALL_CRYPT_CAPTAIN_TEMPLATE = "a0008_normal_champion_crypt_undead"
+_TORSROND_MAP = "b1101_pve"
+_TORSROND_CAPTAIN_TEMPLATE = "b1101_s_soulless_norseman_q_soullessflood03"
+_WILDFOREST_CRYPT_EXIT_MAP = "a0302_wildforest"
+_WILDFOREST_NEFERTARI_GUARD_TEMPLATE = (
+    "a0302_normal_s_undead_mage_q_cultpath01"
+)
+# The Wild Forest entrance is about 138 units from this Crypt Exit guardian.
+# Announce it on entry so the authored actor is not missed by the client.
+_WILDFOREST_GUARD_VISIBILITY_ENTER_RADIUS = 250.0
+_WILDFOREST_GUARD_VISIBILITY_EXIT_RADIUS = 275.0
+_WILDHERZ_CAVERNS_MAP = "a0303_wildcave"
+_WILDHERZ_YACHAK_TEMPLATE = (
+    "a0303_normal_g_beastman_stag_q_goddessreawakening05"
+)
+_TEGAN_GRAVE_MAP = "a0601_defiledsanctum"
+_TEGAN_GRAVE_SMITH_TEMPLATE = (
+    "a0601_normal_g_undead_mage_q_tegangravesmith"
+)
+_TEGAN_GRAVE_SMITH_VISIBILITY_ENTER_RADIUS = 120.0
+_TEGAN_GRAVE_SMITH_VISIBILITY_EXIT_RADIUS = 135.0
 
 
 @contextmanager
@@ -132,6 +154,29 @@ class WorldService:
                 _FORTRESS_GRIMMAG_VISIBILITY_EXIT_RADIUS
                 if exiting
                 else _FORTRESS_GRIMMAG_VISIBILITY_ENTER_RADIUS
+            )
+        if (
+            encounter is not None
+            and encounter.map_id.casefold() == _WILDFOREST_CRYPT_EXIT_MAP
+            and monster is not None
+            and monster.template_id.casefold()
+            == _WILDFOREST_NEFERTARI_GUARD_TEMPLATE
+        ):
+            return (
+                _WILDFOREST_GUARD_VISIBILITY_EXIT_RADIUS
+                if exiting
+                else _WILDFOREST_GUARD_VISIBILITY_ENTER_RADIUS
+            )
+        if (
+            encounter is not None
+            and encounter.map_id.casefold() == _TEGAN_GRAVE_MAP
+            and monster is not None
+            and monster.template_id.casefold() == _TEGAN_GRAVE_SMITH_TEMPLATE
+        ):
+            return (
+                _TEGAN_GRAVE_SMITH_VISIBILITY_EXIT_RADIUS
+                if exiting
+                else _TEGAN_GRAVE_SMITH_VISIBILITY_ENTER_RADIUS
             )
         return (
             MONSTER_VISIBILITY_EXIT_RADIUS
@@ -654,24 +699,59 @@ class WorldService:
             s, move.relative_position
         )
         nearby_groups = ()
-        grimmag_actor_ids = set()
+        proactive_actor_ids = set()
         with s.flow_lock:
             encounter = s.gameplay_monster_encounter
             combat = s.gameplay_combat_state
             announced_actor_ids = set(
                 s.gameplay_announced_monster_actor_ids
             )
+            spawned_actor_ids = set(
+                s.gameplay_spawned_monster_actor_ids
+            )
         if encounter is not None and combat is not None:
             with combat.lock:
                 alive_actor_ids = set(combat.alive_actor_ids)
                 current_positions = dict(combat.monster_positions)
-                grimmag_actor_ids = {
+                proactive_actor_ids = {
                     actor_id
                     for actor_id in alive_actor_ids
                     if (
                         combat.monsters.get(actor_id) is not None
-                        and combat.monsters[actor_id].template_id.casefold()
-                        == _FORTRESS_GRIMMAG_TEMPLATE
+                        and (
+                            (
+                                encounter.map_id.casefold()
+                                == _FORTRESS_GRIMMAG_MAP
+                                and combat.monsters[actor_id].template_id.casefold()
+                                == _FORTRESS_GRIMMAG_TEMPLATE
+                            )
+                            or (
+                                encounter.map_id.casefold() == _SMALL_CRYPT_MAP
+                                and combat.monsters[actor_id].template_id.casefold()
+                                == _SMALL_CRYPT_CAPTAIN_TEMPLATE
+                            )
+                            or (
+                                encounter.map_id.casefold() == _TORSROND_MAP
+                                and combat.monsters[actor_id].template_id.casefold()
+                                == _TORSROND_CAPTAIN_TEMPLATE
+                            )
+                            or (
+                                encounter.map_id.casefold()
+                                == _WILDFOREST_CRYPT_EXIT_MAP
+                                and combat.monsters[actor_id].template_id.casefold()
+                                == _WILDFOREST_NEFERTARI_GUARD_TEMPLATE
+                            )
+                            or (
+                                encounter.map_id.casefold() == _WILDHERZ_CAVERNS_MAP
+                                and combat.monsters[actor_id].template_id.casefold()
+                                == _WILDHERZ_YACHAK_TEMPLATE
+                            )
+                            or (
+                                encounter.map_id.casefold() == _TEGAN_GRAVE_MAP
+                                and combat.monsters[actor_id].template_id.casefold()
+                                == _TEGAN_GRAVE_SMITH_TEMPLATE
+                            )
+                        )
                     )
                 }
             player_world = encounter.coordinate_frame.wire_to_world(
@@ -680,8 +760,11 @@ class WorldService:
             nearby_groups = CharacterService._monster_groups_within_radius(
                 encounter,
                 world_position=player_world,
-                actor_ids=(alive_actor_ids - announced_actor_ids
-                           - CharacterService._pending_entrance_actor_ids(s, combat)),
+                actor_ids=(
+                    (alive_actor_ids - announced_actor_ids
+                     - CharacterService._pending_entrance_actor_ids(s, combat))
+                    | (proactive_actor_ids - spawned_actor_ids)
+                ),
                 positions=current_positions,
                 radius=MONSTER_VISIBILITY_ENTER_RADIUS,
                 extra_groups=combat.runtime_groups,
@@ -697,32 +780,28 @@ class WorldService:
                 or s.gameplay_monster_encounter is not encounter
             ):
                 nearby_groups = ()
-                grimmag_spawn_ids = set()
+                proactive_spawn_ids = set()
             else:
-                # This client does not request the authored Grimmag actor
-                # after vicinity is announced. Send its server actor directly,
-                # reserving the ID first so an optional late ActorRequest
-                # cannot create the same actor twice.
-                grimmag_spawn_ids = {
+                # These authored quest and champion actors can be missing if
+                # the client does not request them after vicinity registration.
+                # Publish them before vicinity and reserve their IDs so late
+                # ActorRequests cannot create duplicates.
+                proactive_spawn_ids = {
                     actor_id
                     for group in nearby_groups
                     for actor_id in group.actor_ids
-                    if (
-                        encounter.map_id.casefold() == _FORTRESS_GRIMMAG_MAP
-                        and actor_id in grimmag_actor_ids
-                        and actor_id
-                        not in s.gameplay_spawned_monster_actor_ids
-                    )
+                    if actor_id in proactive_actor_ids
+                    and actor_id not in s.gameplay_spawned_monster_actor_ids
                 }
                 for group in nearby_groups:
                     s.gameplay_announced_monster_actor_ids.update(
                         group.actor_ids
                     )
                 s.gameplay_spawned_monster_actor_ids.update(
-                    grimmag_spawn_ids
+                    proactive_spawn_ids
                 )
-                s.gameplay_requested_actor_ids.update(grimmag_spawn_ids)
-                if grimmag_spawn_ids:
+                s.gameplay_requested_actor_ids.update(proactive_spawn_ids)
+                if proactive_spawn_ids:
                     s.gameplay_monsters_spawned = True
                 s.gameplay_vicinity_announced = bool(
                     s.gameplay_announced_monster_actor_ids
@@ -742,7 +821,7 @@ class WorldService:
                     f"[{GAMEPLAY_SERVICE_NAME}] announced fortress Grimmag "
                     f"actor(s) {grimmag_ids} to {s.addr}"
                 )
-            spawn_ids_in_group = grimmag_spawn_ids.intersection(
+            spawn_ids_in_group = proactive_spawn_ids.intersection(
                 group.actor_id_set
             )
             if spawn_ids_in_group:
@@ -753,7 +832,7 @@ class WorldService:
                 if scripted_group is not None:
                     batch = CharacterService._new_monster_batch_for_viewer(
                         s, combat, scripted_group.spawn_batch,
-                        label="fortress-grimmag-monster-spawn",
+                        label="authored-priority-monster-spawn",
                     )
                 else:
                     batch = None
@@ -764,13 +843,13 @@ class WorldService:
                             packet,
                             total_bit_length=packet_bits,
                             track=True,
-                            label_prefix="fortress-grimmag-monster-spawn",
+                            label_prefix="authored-priority-monster-spawn",
                         )
                     else:
                         s.send_reliable_ordered(
                             (packet, packet_bits),
                             track=True,
-                            label="fortress-grimmag-monster-spawn",
+                            label="authored-priority-monster-spawn",
                         )
                     delivered_positions = {
                         actor_id: current_positions[actor_id]
@@ -778,14 +857,14 @@ class WorldService:
                         if actor_id in current_positions
                     }
                     print(
-                        f"[{GAMEPLAY_SERVICE_NAME}] proactively sent fortress "
-                        f"Grimmag NewMonster actor(s) "
+                        f"[{GAMEPLAY_SERVICE_NAME}] proactively sent authored "
+                        f"priority NewMonster actor(s) "
                         f"{scripted_group.actor_ids} at "
                         f"{tuple(delivered_positions.values())!r} to {s.addr}"
                     )
-            # Grimmag must be registered before ActorsEnterVicinity creates
-            # the client's placeholder for this authored actor. Ordinary
-            # monsters retain the standard vicinity-then-ActorRequest flow.
+            # Register the selected champion before vicinity creates the
+            # client's placeholder. Other monsters keep the ordinary
+            # vicinity-then-ActorRequest flow.
             CharacterService._send_monster_vicinity(
                 s, combat, group,
                 label="monster-actors-enter-vicinity",
@@ -802,8 +881,7 @@ class WorldService:
                 print(
                     f"[{GAMEPLAY_SERVICE_NAME}] announced nearby monster actors "
                     f"{group.actor_ids} inside "
-                    f"{MONSTER_VISIBILITY_ENTER_RADIUS:.1f}-unit enter radius; "
-                    "awaiting ActorRequest for each"
+                    f"{MONSTER_VISIBILITY_ENTER_RADIUS:.1f}-unit enter radius"
                 )
         if nearby_groups and s.gameplay_presence_callback is not None:
             s.gameplay_presence_callback(

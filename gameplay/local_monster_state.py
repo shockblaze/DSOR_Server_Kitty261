@@ -91,7 +91,29 @@ _LOCAL_ENCOUNTERS = {
     },
 }
 
+# Torstrond's authored Inquisitor SpawnPoint has no NpcId, although its
+# ungated guardian row is intended to create this renderable map actor.
+_AUTHORED_SPAWNPOINT_TEMPLATE_OVERRIDES = {
+    ("b1101_pve", "b1101_s_undead_mage_q_silentscreams06_spawnpoint"):
+        "b1101_s_undead_mage_q_SilentScreams06",
+}
+
 LOCAL_MONSTER_ACTOR_BASE = 0x00030000
+_CLIENT_SCENE_ACTOR_ID_MAPS = frozenset({
+    "a0008_crypt_dun",
+    "a0302_wildforest",
+    "a0303_wildcave",
+    # Torsrond's client scene registers authored SpawnPoints in the ordinary
+    # 0x30000 range. Keep server controlled quest actors such as Captain
+    # Ulkell in the secondary actor range to avoid that collision.
+    "b1101_pve",
+    # Eternal Watch reserves ordinary actor ids for its six authored quest
+    # SpawnPoints, including the Fate of the King frost-catchers.
+    "b1202_dun",
+    # Tegansruh's client scene already registers an actor at 0x30000. Keep
+    # authored server monsters such as Benkay in the secondary actor range.
+    "a0601_defiledsanctum",
+})
 
 
 def map_monster_actor_base(
@@ -107,6 +129,10 @@ def map_monster_actor_base(
     # all boss rooms and approach arenas use the secondary actor slot range (+ 0x1000).
     is_boss = (
         map_id.casefold() in APPROACH_BOSS_MAPS
+        # These client scenes own ids in the ordinary 0x30000 range for
+        # authored SpawnPoints. Keep server monsters in the secondary range,
+        # as on boss arenas, so NewMonster cannot collide with them.
+        or map_id.casefold() in _CLIENT_SCENE_ACTOR_ID_MAPS
         or load_map_encounter_policy(static_database_path, map_id).is_boss_room
     )
     return LOCAL_MONSTER_ACTOR_BASE + (0x1000 if is_boss else 0)
@@ -357,6 +383,8 @@ class MonsterAttackDefinition:
     start_offset: tuple[float, float, float, float] = (
         0.0, 0.0, 0.0, 0.0
     )
+    # _Template_SkillBullet.StaticCollision: the bullet stops at walls.
+    static_collision: bool = False
     loop_start_frame: int = 0
     damage_types: tuple[tuple[str, float], ...] = (("Physical", 1.0),)
     # _Template_Skill CoolDown (seconds), InitialCoolDown ("3|5": a first wait
@@ -1403,7 +1431,8 @@ def _load_runtime_template(
                        COALESCE(s.PlayerWidth, 0),
                        COALESCE(s.EndWidth, 0),
                        COALESCE(s.Angle, 0),
-                       COALESCE(s.SkillBulletId, '')
+                       COALESCE(s.SkillBulletId, ''),
+                       COALESCE(b.StaticCollision, 0)
                 FROM _Template_Skill AS s
                 LEFT JOIN _Template_SkillBullet AS b
                   ON b.Id=s.SkillBulletId
@@ -1525,6 +1554,7 @@ def _load_runtime_template(
                         ),
                         motion_type=str(skill_row[14] or "Straight"),
                         start_offset=start_offset,
+                        static_collision=bool(skill_row[36] or 0),
                         loop_start_frame=max(0, int(skill_row[18])),
                         damage_types=_parse_damage_types(skill_row[20]),
                         cooldown=max(0.0, float(skill_row[21] or 0.0)),
@@ -2349,15 +2379,17 @@ def _navigation_for_map(
         / f"{map_id}.tok"
     )
     try:
-        # Atlantis Above Water has several authored bridges just under the
-        # generic 1 m portal cutoff. They are walkable in the client and join
-        # the map's main ground regions, so retain those connections for
-        # movement validation and monster pathing on this map.
-        portal_width = (
-            0.9
-            if str(map_id).casefold() == "pw023_atlantis_above_water_01_dun"
-            else 1.0
-        )
+        # These maps have authored connections narrower than the generic 1 m
+        # portal cutoff. They are walkable in the client and join the map's
+        # ground regions, so retain those connections for movement validation
+        # and monster pathing.
+        portal_width = {
+            # This hub's path to J'Ibal/c2200_quest_eldest is split into
+            # separate components at the generic cutoff; a 0.75 m
+            # connection restores the authored walkable route.
+            "c2200_hub": 0.75,
+            "pw023_atlantis_above_water_01_dun": 0.9,
+        }.get(str(map_id).casefold(), 1.0)
         return load_navigation_mesh(
             navigation_path, minimum_portal_width=portal_width,
         )
@@ -2452,6 +2484,11 @@ def _load_dynamic_monster_encounter(
         all_fixed_rows = []
         for row_id, transform, npc_id, event_set, object_id, _rank in authored_fixed_rows:
             template_id = str(npc_id or "").strip()
+            if not template_id:
+                template_id = _AUTHORED_SPAWNPOINT_TEMPLATE_OVERRIDES.get(
+                    (str(map_id).casefold(), str(object_id or "").casefold()),
+                    "",
+                )
             if not template_id:
                 # Some shipped PW map records put the monster template
                 # directly in _ID and leave NpcId empty. Resolve only exact

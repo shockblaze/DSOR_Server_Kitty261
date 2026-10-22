@@ -57,7 +57,7 @@ SKILL_HIT_MARKER_BITS = os.getenv(
 # One owner ``MoveCommand`` followed by one summon ``SustainedSkillCommand``.
 # The retail sample measures 1,026 bits with the inheritance marker.
 SUSTAINED_SUMMON_BATCH_BITS = (
-    1026 if SKILL_COMMAND_DERIVED_FLAG is not None else 1025
+    1026 if SKILL_HIT_MARKER_BITS else 1025
 )
 
 
