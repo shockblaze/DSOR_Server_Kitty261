@@ -126,6 +126,9 @@ _CLIENT_SCENE_ACTOR_ID_MAPS = frozenset({
     # Time Rift's client scene owns the ordinary range for its authored
     # Gorgon and Zorlob quest SpawnPoints. Keep server actors in the free range.
     "c2302_dun",
+    # Temple of Eternity has authored quest SpawnPoints on separate walkable
+    # islands; its client scene also registers actors in the ordinary range.
+    "c2303_dun",
     # Tegansruh's client scene already registers an actor at 0x30000. Keep
     # authored server monsters such as Benkay in the secondary actor range.
     "a0601_defiledsanctum",
@@ -2406,7 +2409,9 @@ def _navigation_for_map(
             "c2200_hub": 0.75,
             # The Honor Barracks passage to B'Orlok is authored below 1 m.
             "c2202_pve": 0.9,
-            "pw023_atlantis_above_water_01_dun": 0.9,
+            # Cloud bridge connections are authored as very narrow PathEngine
+            # portals. Keep every authored connection for player movement.
+            "pw023_atlantis_above_water_01_dun": 0.0,
         }.get(str(map_id).casefold(), 1.0)
         return load_navigation_mesh(
             navigation_path, minimum_portal_width=portal_width,
@@ -2748,6 +2753,7 @@ def _load_dynamic_monster_encounter(
                 and not mounted
                 and not authored_boss
                 and allowed_component is not None
+                and str(map_id).casefold() != "c2303_dun"
                 and isinstance(navigation, PathEngineNavigationMesh)
                 and navigation.component_for_position(position)
                 != allowed_component
