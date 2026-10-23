@@ -851,6 +851,28 @@ class MonsterReturnHomeTransition:
 
 
 @dataclass(frozen=True)
+class MonsterAuraStrike:
+    """A one-shot damaging aura a monster skill puts on its caster.
+
+    CONTRACT: a UserStatusEffects entry whose status has AuraRadius > 0,
+    AuraTargets Enemies and no duration, and whose AuraEffectId children
+    carry ``CurrHealthPointsDmg:$N,relative,<type>``: every enemy within
+    AuraRadius of the caster takes coefficient x the monster's damage, once,
+    DE seconds after the skill's hit frame.
+    EVIDENCE: heredur_base_doublestrike (HitFrame 26) carries
+    boss_heredur_aura_360smash (radius 5, DE:0.76 = 19 frames, $0 -0.5);
+    its sequence miniboss_01_heredur_skill_02 shakes the camera at frames 26
+    and 44, the two blows of the double strike.
+    """
+
+    resource_id: str
+    radius: float
+    delay_ticks: int
+    # (coefficient, damage type) per CurrHealthPointsDmg instruction.
+    damage_programs: tuple[tuple[float, str], ...]
+
+
+@dataclass(frozen=True)
 class MonsterAttack:
     attacker_actor_id: int
     target_actor_id: int
@@ -880,6 +902,9 @@ class MonsterAttack:
     execution_context_tick: int | None = None
     bullet_count: int = 1
     resolved_target_actor_ids: tuple[int, ...] = ()
+    # Set on the extra blow a skill's user aura lands after its hit frame
+    # (MonsterAuraStrike); None for the skill's own hit.
+    aura_strike: MonsterAuraStrike | None = None
 
 
 @dataclass(frozen=True)
@@ -1133,6 +1158,11 @@ class LocalCombatState:
         self._route_refresh_budget = 0
         self._route_actor_cursor = 0
         self.monster_target_actor_ids = {}
+        # Scripted map actors can follow an authoritative fixed target instead
+        # of acquiring a player (for example, the Crypt of Kings ram).
+        self.scripted_monster_targets: dict[
+            int, tuple[float, float, float]
+        ] = {}
         self.returning_home_actor_ids: set[int] = set()
         self.returning_home_started_at: dict[int, float] = {}
         self.returning_home_progress: dict[int, float] = {}
@@ -1221,6 +1251,11 @@ class LocalCombatState:
         self.pending_player_summon_attacks: dict[
             int, _PendingPlayerSummonAttack
         ] = {}
+        # Bullets already fired by a construction that has since expired:
+        # (the expired summon, its pending attack), resolved like any other.
+        self.orphaned_player_summon_attacks: dict[
+            int, tuple[PlayerSummonActor, _PendingPlayerSummonAttack]
+        ] = {}
         self.last_player_summon_attack_at: dict[int, float] = {}
         self.last_player_summon_playback_at: dict[int, float] = {}
         self.last_player_summon_support_at: dict[int, float] = {}
@@ -1233,6 +1268,11 @@ class LocalCombatState:
         ] = {}
         self._monster_user_effects: dict[
             str, tuple[VictimStatusEffectDefinition, ...]
+        ] = {}
+        # Skill resource id -> {user effect resource id: MonsterAuraStrike},
+        # filled with _monster_user_effects.
+        self._monster_aura_strikes: dict[
+            str, dict[str, MonsterAuraStrike]
         ] = {}
         self._status_effect_modifier_programs: dict[
             int, tuple[tuple[str, tuple[str, ...]], ...]
@@ -1288,7 +1328,13 @@ class LocalCombatState:
                 escape_range=float(runtime.escape_range),
                 travel_distance=(
                     float(runtime.travel_distance)
-                    if str(monster.rank or "").casefold().startswith("rank_boss")
+                    if (
+                        str(monster.rank or "").casefold().startswith("rank_boss")
+                        or (
+                            encounter.map_id.casefold() == "f4203_boss"
+                            and monster.template_id.casefold() == "f4203_boss_06_ram"
+                        )
+                    )
                     else min(
                         float(runtime.travel_distance),
                         MONSTER_NAVIGATION_RADIUS_CAP,
@@ -1299,9 +1345,15 @@ class LocalCombatState:
                 target_radius=monster_target_radii(encounter.static_database_path).get(monster.template_id),
                 attack=runtime.attack,
                 attacks=runtime.attacks or (runtime.attack,),
-                invulnerable=is_tower_mechanism(
-                    encounter.static_database_path, encounter.map_id,
-                    monster.template_id,
+                invulnerable=(
+                    is_tower_mechanism(
+                        encounter.static_database_path, encounter.map_id,
+                        monster.template_id,
+                    )
+                    or (
+                        encounter.map_id.casefold() == "f4203_boss"
+                        and monster.template_id.casefold() == "f4203_boss_06_ram"
+                    )
                 ),
             )
         if set(result) != set(encounter.actor_ids):
@@ -1522,19 +1574,32 @@ class LocalCombatState:
                 run_speed=float(runtime.run_speed),
                 aggro_range=float(runtime.aggro_range),
                 escape_range=float(runtime.escape_range),
-                travel_distance=min(
-                    float(runtime.travel_distance),
-                    MONSTER_NAVIGATION_RADIUS_CAP,
+                travel_distance=(
+                    float(runtime.travel_distance)
+                    if (
+                        self.encounter.map_id.casefold() == "f4203_boss"
+                        and monster.template_id.casefold() == "f4203_boss_06_ram"
+                    )
+                    else min(
+                        float(runtime.travel_distance),
+                        MONSTER_NAVIGATION_RADIUS_CAP,
+                    )
                 ),
                 attack_interval=float(runtime.attack_interval),
                 collision_radius=float(runtime.capsule_radius),
                 target_radius=monster_target_radii(self.encounter.static_database_path).get(monster.template_id),
                 attack=runtime.attack,
                 attacks=runtime.attacks or (runtime.attack,),
-                invulnerable=is_tower_mechanism(
-                    self.encounter.static_database_path,
-                    self.encounter.map_id,
-                    monster.template_id,
+                invulnerable=(
+                    is_tower_mechanism(
+                        self.encounter.static_database_path,
+                        self.encounter.map_id,
+                        monster.template_id,
+                    )
+                    or (
+                        self.encounter.map_id.casefold() == "f4203_boss"
+                        and monster.template_id.casefold() == "f4203_boss_06_ram"
+                    )
                 ),
             )
             self.monsters[actor_id] = combatant
@@ -2786,6 +2851,7 @@ class LocalCombatState:
                         ),
                         default=0.0,
                     )
+                    visualizer_lifetime = visual_lifetime
                     visual_lifetime = max(
                         visual_lifetime,
                         max(
@@ -2842,10 +2908,18 @@ class LocalCombatState:
                             0.0,
                             float(row[6]) / SERVER_TICKS_PER_SECOND,
                         ),
-                        lifetime_seconds=max(
-                            0.0,
-                            float(row[8] or 0.0),
-                            visual_lifetime,
+                        # The skill's own summon visualizer (and its despawn
+                        # aura) is the construction's authored duration; the
+                        # template LifeTime only bounds summons without one.
+                        # Machine Gun authors 20 s on both but LifeTime 60:
+                        # max() kept it firing and standing 40 s after its
+                        # timer and ground marker had ended (2026-10-23).
+                        lifetime_seconds=(
+                            visual_lifetime
+                            if visualizer_lifetime > 0.0
+                            else max(
+                                0.0, float(row[8] or 0.0), visual_lifetime,
+                            )
                         ),
                         despawn_duration_seconds=max(
                             0.0, float(row[10] or 0.0)
@@ -3695,7 +3769,9 @@ class LocalCombatState:
             created.append(summon)
         return PlayerSummonSpawn(tuple(created), discarded)
 
-    def expire_player_summon(self, actor_id: int) -> bool:
+    def expire_player_summon(
+        self, actor_id: int, *, land_fired_bullets: bool = False,
+    ) -> bool:
         actor_id = int(actor_id)
         removed = self.player_summons.pop(actor_id, None)
         self.player_location_visuals = {
@@ -3718,7 +3794,21 @@ class LocalCombatState:
         for monster_actor_id, attack in self.pending_monster_attack_items():
             if int(attack.target_actor_id) == actor_id:
                 self._remove_pending_monster_attack(monster_actor_id, attack)
-        self.pending_player_summon_attacks.pop(actor_id, None)
+        pending = self.pending_player_summon_attacks.pop(actor_id, None)
+        # A bullet the turret already fired flies on and lands after the
+        # turret's lifetime ends. Dropping it with the turret left the last
+        # shot of every Combat Turret visibly striking without damage
+        # ("touche parfois l'ennemi mais l'attaque n'est pas detectee").
+        # Only the lifetime end keeps it: a round reset, a kill or a
+        # replacement still discards everything the summon owned.
+        if (
+            land_fired_bullets
+            and removed is not None
+            and pending is not None
+            and pending.attack.command_id
+            in {BULLET_SKILL_COMMAND, TARGET_BULLET_SKILL_COMMAND}
+        ):
+            self.orphaned_player_summon_attacks[actor_id] = (removed, pending)
         self.last_player_summon_attack_at.pop(actor_id, None)
         self.last_player_summon_playback_at.pop(actor_id, None)
         self.last_player_summon_support_at.pop(actor_id, None)
@@ -4651,8 +4741,60 @@ class LocalCombatState:
                 definition.user_status_effects,
                 default_trigger="skillstart",
             )
+            strikes = self._load_monster_aura_strikes(
+                database, definition.user_status_effects
+            )
+        self._monster_aura_strikes[definition.resource_id] = strikes
         self._monster_user_effects[definition.resource_id] = effects
         return effects
+
+    def _load_monster_aura_strikes(
+        self, database: sqlite3.Connection, value: str
+    ) -> dict[str, MonsterAuraStrike]:
+        """Find the one-shot damaging enemy auras among user effects.
+
+        SEE: MonsterAuraStrike. Persistent auras (a duration, e.g. fire_aura
+        D:5), ally/creator/summoner auras and children without a relative
+        CurrHealthPointsDmg (heals, buffs, slows) are left out.
+        """
+
+        strikes: dict[str, MonsterAuraStrike] = {}
+        for entry in str(value or "").split(";"):
+            entry = entry.strip()
+            if not entry:
+                continue
+            for aura in self._load_victim_status_effects(
+                database, entry, default_trigger="skillstart"
+            ):
+                if (
+                    aura.aura_radius <= 0.0
+                    or aura.aura_targets.strip().casefold() != "enemies"
+                    or aura.duration_ticks > 0
+                ):
+                    continue
+                programs = tuple(
+                    (coefficient, damage_type)
+                    for child in self._load_location_aura_effects(
+                        database, entry
+                    )
+                    for coefficient, damage_type, relative
+                    in self._status_damage_programs(child, ticks=False)
+                    if relative and coefficient > 0.0
+                )
+                if programs:
+                    strikes[aura.resource_id] = MonsterAuraStrike(
+                        resource_id=aura.resource_id,
+                        radius=aura.aura_radius,
+                        delay_ticks=aura.delay_ticks,
+                        damage_programs=programs,
+                    )
+        return strikes
+
+    def _monster_aura_strikes_for(
+        self, definition: MonsterAttackDefinition
+    ) -> dict[str, MonsterAuraStrike]:
+        self._load_monster_user_effects(definition)
+        return self._monster_aura_strikes.get(definition.resource_id, {})
 
     @staticmethod
     def _clean_modifier_token(value: str) -> str:
@@ -6899,6 +7041,67 @@ class LocalCombatState:
                 self.monster_moving[actor_id] = False
                 occupied.append(start)
                 continue
+            scripted_goal = self.scripted_monster_targets.get(actor_id)
+            if (
+                scripted_goal is not None
+                and self._distance(start, scripted_goal) <= 18.0
+            ):
+                # The last section of the F4203 authored ram route ends at the
+                # arena gate, where the collision/nav mesh may not expose a
+                # connected triangle to A*. Keep the ram on its fixed approach
+                # and let the gate impact trigger finish the sequence.
+                dx = scripted_goal[0] - start[0]
+                dz = scripted_goal[2] - start[2]
+                distance = math.hypot(dx, dz)
+                step = min(float(monster.run_speed) * elapsed, distance)
+                if distance > 1e-5 and step > 1e-6:
+                    ratio = step / distance
+                    destination = (
+                        start[0] + dx * ratio,
+                        start[1] + (scripted_goal[1] - start[1]) * ratio,
+                        start[2] + dz * ratio,
+                    )
+                    self.monster_positions[actor_id] = destination
+                    yaw = math.atan2(-dx, -dz)
+                    self.monster_yaws[actor_id] = yaw
+                    self.monster_moving[actor_id] = True
+                    if self._monster_movement_publish_due(
+                        actor_id,
+                        server_tick,
+                        moving=True,
+                        was_moving=was_moving,
+                        position=destination,
+                    ):
+                        movements.append(MonsterMovement(
+                            actor_id,
+                            destination,
+                            self.encounter.coordinate_frame.world_to_wire(
+                                destination
+                            ),
+                            yaw,
+                            True,
+                            int(server_tick) & 0xFFFFFFFF,
+                        ))
+                    occupied.append(destination)
+                    continue
+                self.monster_moving[actor_id] = False
+                occupied.append(start)
+                if was_moving and self._monster_movement_publish_due(
+                    actor_id,
+                    server_tick,
+                    moving=False,
+                    was_moving=True,
+                    position=start,
+                ):
+                    movements.append(MonsterMovement(
+                        actor_id,
+                        start,
+                        self.encounter.coordinate_frame.world_to_wire(start),
+                        previous_yaw,
+                        False,
+                        int(server_tick) & 0xFFFFFFFF,
+                    ))
+                continue
             direct_distance = self._distance(start, player_position)
             home_distance = self._distance(start, home)
             player_home_distance = self._distance(player_position, home)
@@ -6954,6 +7157,12 @@ class LocalCombatState:
                 direct_distance = enemies[0][0]
                 player_home_distance = self._distance(player_position, home)
             preferred_stop_distance = self._preferred_stop_distance(monster)
+            if actor_id in self.scripted_monster_targets:
+                # Scripted actors (such as the F4203 battering ram) are moving
+                # to a fixed world target, not approaching a player to attack.
+                # Their attack range must not leave them standing short of the
+                # authored impact point.
+                preferred_stop_distance = 0.0
             # A shooter with a wall between it and its target walks on to
             # find a line of sight instead of standing off behind the wall.
             if (
@@ -7141,6 +7350,7 @@ class LocalCombatState:
             # freezing wherever the player happened to outrange it.
             if (
                 not returning_home
+                and actor_id not in self.scripted_monster_targets
                 and home_distance <= MONSTER_HOME_ARRIVAL_DISTANCE
                 and (
                     player_home_distance > MONSTER_SIMULATION_RADIUS
@@ -7184,6 +7394,7 @@ class LocalCombatState:
             )
             engaged = (
                 returning_home
+                or actor_id in self.scripted_monster_targets
                 or home_distance > MONSTER_HOME_ARRIVAL_DISTANCE
                 or direct_distance
                 <= min(
@@ -9014,6 +9225,51 @@ class LocalCombatState:
                         summon.position[1],
                         summon.position[2] + direction[2] * reach,
                     )
+            elif (
+                attack_skill_type == "Melee"
+                and geometry.targeting_type.casefold() == "radius"
+                and (
+                    definition.stationary
+                    or getattr(definition, "movement_locked", False)
+                )
+            ):
+                # A stationary summon's area strike (the Tesla Turret: Melee,
+                # Radius, HitRange 3, its damage auras 3 m) hits every enemy
+                # within its HitRange around itself. Its AttackRange (200)
+                # only lets it act: picked as the one nearest monster within
+                # that, it zapped a single monster up to 200 m away.
+                monsters_in_area = [
+                    (self._distance(summon.position, self.monster_positions[monster_actor_id]), monster_actor_id)
+                    for monster_actor_id in self.living_actor_ids
+                    if monster_actor_id not in self.returning_home_actor_ids
+                ]
+                players_in_area = [
+                    (self._distance(summon.position, player_positions[target_actor_id]), target_actor_id)
+                    for target_actor_id in hostile_by_owner.get(summon.owner_actor_id, ())
+                    if can_target_players and target_actor_id in player_positions
+                ]
+                area = sorted(
+                    [
+                        (distance, monster_actor_id)
+                        for distance, monster_actor_id in monsters_in_area
+                        if distance <= geometry.hit_range
+                        + max(0.0, self.monsters[monster_actor_id].collision_radius)
+                    ]
+                    + [
+                        (distance, player_actor_id)
+                        for distance, player_actor_id in players_in_area
+                        if distance <= geometry.hit_range
+                    ]
+                )
+                if not area:
+                    continue
+                target_actor_ids = tuple(actor for _distance, actor in area)
+                target_actor_id = target_actor_ids[0]
+                target_position = (
+                    self.monster_positions[target_actor_id]
+                    if target_actor_id in self.monsters
+                    else player_positions[target_actor_id]
+                )
             else:
                 candidates = tuple(
                     (
@@ -9329,26 +9585,43 @@ class LocalCombatState:
         lethal_by_owner = lethal_player_actor_ids_by_owner or {}
         damage_resolutions = []
         support_applications = []
-        for actor_id, pending in tuple(
-            self.pending_player_summon_attacks.items()
-        ):
+        due_items = [
+            (actor_id, pending, None)
+            for actor_id, pending in tuple(
+                self.pending_player_summon_attacks.items()
+            )
+        ] + [
+            (actor_id, pending, expired)
+            for actor_id, (expired, pending) in tuple(
+                self.orphaned_player_summon_attacks.items()
+            )
+        ]
+        for actor_id, pending, expired in due_items:
             attack = pending.attack
             if current_time < attack.due_at:
                 continue
-            del self.pending_player_summon_attacks[actor_id]
+            if expired is None:
+                del self.pending_player_summon_attacks[actor_id]
+            else:
+                del self.orphaned_player_summon_attacks[actor_id]
             if pending.target_due_times:
                 due = tuple(item for item in pending.target_due_times if item[1] <= current_time)
                 remaining = tuple(item for item in pending.target_due_times if item[1] > current_time)
                 if remaining:
-                    self.pending_player_summon_attacks[actor_id] = replace(
+                    rest = replace(
                         pending, attack=replace(attack, due_at=remaining[0][1],
                                                 impact_tick=remaining[0][2]),
                         target_actor_ids=tuple(item[0] for item in remaining),
                         target_due_times=remaining,
                     )
+                    if expired is None:
+                        self.pending_player_summon_attacks[actor_id] = rest
+                    else:
+                        self.orphaned_player_summon_attacks[actor_id] = (expired, rest)
                 pending = replace(pending, target_actor_ids=tuple(item[0] for item in due))
-            summon = self.player_summons.get(actor_id)
-            if (summon is None or self.player_summon_health.get(actor_id, [0])[0] <= 0
+            summon = expired or self.player_summons.get(actor_id)
+            if expired is None and (
+                    summon is None or self.player_summon_health.get(actor_id, [0])[0] <= 0
                     or self._monster_actions_disabled(actor_id, now=current_time)):
                 continue
             if attack.target_actor_id == summon.owner_actor_id:
@@ -9431,10 +9704,11 @@ class LocalCombatState:
                     if damage <= 0:
                         continue
                     health[0] = current
-                    support_applications.extend(self._apply_summon_causer_effects(
-                        summon, pending.geometry, now=current_time,
-                        server_tick=attack.impact_tick, pvp=True,
-                    ))
+                    if expired is None:
+                        support_applications.extend(self._apply_summon_causer_effects(
+                            summon, pending.geometry, now=current_time,
+                            server_tick=attack.impact_tick, pvp=True,
+                        ))
                     effects = tuple(
                         effect
                         for effect in pending.geometry.victim_status_effects
@@ -9539,10 +9813,11 @@ class LocalCombatState:
                 )
                 if damage <= 0:
                     continue
-                support_applications.extend(self._apply_summon_causer_effects(
-                    summon, pending.geometry, now=current_time,
-                    server_tick=attack.impact_tick,
-                ))
+                if expired is None:
+                    support_applications.extend(self._apply_summon_causer_effects(
+                        summon, pending.geometry, now=current_time,
+                        server_tick=attack.impact_tick,
+                    ))
                 self.monster_health[target.actor_id] = current
                 effects = tuple(
                     effect
@@ -10074,6 +10349,13 @@ class LocalCombatState:
             ):
                 continue
             monster = self.monsters[actor_id]
+            if (
+                self.encounter.map_id.casefold() == "f4203_boss"
+                and monster.template_id.casefold() == "f4203_boss_06_ram"
+            ):
+                # The Crypt of Kings ram is scripted to break the arena door;
+                # its retail target is a destroyable obstacle, never a player.
+                continue
             tower_fire_burst = (
                 monster.invulnerable
                 and "fire_shooter" in monster.template_id.casefold()
@@ -10511,6 +10793,30 @@ class LocalCombatState:
                 else:
                     self.tower_fire_burst_remaining[actor_id] = remaining - 1
             self.pending_monster_attacks[actor_id] = attack
+            if (
+                attack.user_status_effects
+                and attack_target_actor_id not in self.monsters
+            ):
+                # SEE: MonsterAuraStrike. The aura's DE counts from the hit
+                # frame (Heredur's second blow: 26 + 19 = frame 45, its
+                # sequence's second shake at 44).
+                strikes = self._monster_aura_strikes_for(definition)
+                for effect in attack.user_status_effects:
+                    strike = strikes.get(effect.resource_id)
+                    if strike is None:
+                        continue
+                    delay_ticks = (
+                        max(0, int(attack.hit_frame)) + strike.delay_ticks
+                    )
+                    self.pending_monster_projectile_attacks.setdefault(
+                        actor_id, []
+                    ).append(replace(
+                        attack,
+                        due_at=current_time
+                        + delay_ticks / SERVER_TICKS_PER_SECOND,
+                        impact_tick=(start_tick + delay_ticks) & 0xFFFFFFFF,
+                        aura_strike=strike,
+                    ))
             attacks.append(attack)
             next_cursor = (
                 start_index + offset + 1
@@ -10810,6 +11116,28 @@ class LocalCombatState:
         if not flights:
             self.pending_monster_projectile_attacks.pop(actor_id, None)
 
+    def _mark_monster_area_target_resolved(
+        self, actor_id: int, attack: MonsterAttack, target_actor_id: int,
+    ) -> None:
+        """Record one struck target on an area attack, where it is held."""
+
+        actor_id = int(actor_id)
+        updated = replace(
+            attack,
+            resolved_target_actor_ids=(
+                *attack.resolved_target_actor_ids, int(target_actor_id),
+            ),
+        )
+        for index, pending in enumerate(
+            self.pending_monster_projectile_attacks.get(actor_id, ())
+        ):
+            if pending is attack:
+                self.pending_monster_projectile_attacks[actor_id][index] = (
+                    updated
+                )
+                return
+        self.pending_monster_attacks[actor_id] = updated
+
     def resolve_due_monster_attacks(
         self,
         player_position: tuple[float, float, float],
@@ -10866,11 +11194,14 @@ class LocalCombatState:
                 and definition.targeting_type.casefold()
                 in {"radius", "point", "location"}
             )
+            aura_strike = attack.aura_strike
             is_multi_target_area = (
-                (is_directional_shape or is_ground_target_area)
-                and not targets_monster
-                and not definition.self_buff
-            )
+                (
+                    (is_directional_shape or is_ground_target_area)
+                    and not definition.self_buff
+                )
+                or aura_strike is not None
+            ) and not targets_monster
             if (
                 not targets_monster
                 and attack.target_actor_id != player_actor_id
@@ -10885,7 +11216,8 @@ class LocalCombatState:
             if not is_multi_target_area:
                 self._remove_pending_monster_attack(actor_id, attack)
             if (
-                attack.definition is not None
+                aura_strike is None
+                and attack.definition is not None
                 and attack.definition.summon_template
                 and attack.target_actor_id == player_actor_id
             ):
@@ -10897,9 +11229,13 @@ class LocalCombatState:
                     position=tuple(float(v) for v in monster_position[:3]),
                     level=int(monster.level),
                 ))
-            if attack.definition is not None and attack.definition.self_buff:
+            if (
+                aura_strike is None
+                and attack.definition is not None
+                and attack.definition.self_buff
+            ):
                 continue
-            if definition.damage_modifier <= 0.0:
+            if aura_strike is None and definition.damage_modifier <= 0.0:
                 continue
             if (
                 targets_monster
@@ -10912,7 +11248,14 @@ class LocalCombatState:
                 # Several impacts can be due in one tick. Only the first
                 # lethal hit owns the death transition; discard later hits.
                 continue
-            if attack.command_id in {
+            if aura_strike is not None:
+                # Centred on the caster where it stands when the blow lands.
+                if (
+                    self._distance(target_world, monster_position)
+                    > aura_strike.radius + PLAYER_PROJECTILE_COLLISION_RADIUS
+                ):
+                    continue
+            elif attack.command_id in {
                 BULLET_SKILL_COMMAND,
                 TARGET_BULLET_SKILL_COMMAND,
             }:
@@ -10966,7 +11309,15 @@ class LocalCombatState:
                         incoming_damage_multiplier
                     ).items()
                 }
-                weighted = tuple(definition.damage_types)
+                weighted = (
+                    tuple(
+                        (damage_type, coefficient)
+                        for coefficient, damage_type
+                        in aura_strike.damage_programs
+                    )
+                    if aura_strike is not None
+                    else tuple(definition.damage_types)
+                )
                 total_weight = sum(
                     max(0.0, float(weight)) for _name, weight in weighted
                 )
@@ -11012,7 +11363,15 @@ class LocalCombatState:
                 (monster.minimum_damage + monster.maximum_damage) / 2
                 * outgoing_multiplier
                 * defense_multiplier
-                * max(0.0, float(definition.damage_modifier))
+                * (
+                    sum(
+                        coefficient
+                        for coefficient, _damage_type
+                        in aura_strike.damage_programs
+                    )
+                    if aura_strike is not None
+                    else max(0.0, float(definition.damage_modifier))
+                )
             )
             # Some authored fixed shooters omit MinDamage/MaxDamage. Their
             # visual projectile still hits, so do not silently turn that hit
@@ -11114,12 +11473,8 @@ class LocalCombatState:
             damage = previous - current
             if damage <= 0 and not blocked:
                 if is_multi_target_area:
-                    self.pending_monster_attacks[actor_id] = replace(
-                        attack,
-                        resolved_target_actor_ids=(
-                            *attack.resolved_target_actor_ids,
-                            player_actor_id,
-                        ),
+                    self._mark_monster_area_target_resolved(
+                        actor_id, attack, player_actor_id
                     )
                 continue
             self.note_player_attacked(player_actor_id, now=current_time)
@@ -11138,7 +11493,10 @@ class LocalCombatState:
                     server_tick=attack.impact_tick,
                     hit_tags=(0,),
                     skill_index=attack.skill_index,
-                    victim_status_effects=tuple(
+                    # The skill's victim effects ride its own hit; an aura
+                    # strike's child carries only its damage.
+                    victim_status_effects=() if aura_strike is not None
+                    else tuple(
                         definition
                         for definition in self._load_monster_attack_effects(
                             definition
@@ -11156,14 +11514,19 @@ class LocalCombatState:
                 )
             )
             if is_multi_target_area:
-                self.pending_monster_attacks[actor_id] = replace(
-                    attack,
-                    resolved_target_actor_ids=(
-                        *attack.resolved_target_actor_ids,
-                        player_actor_id,
-                    ),
+                self._mark_monster_area_target_resolved(
+                    actor_id, attack, player_actor_id
                 )
         if finalize_area_attacks:
+            for actor_id, flights in tuple(
+                self.pending_monster_projectile_attacks.items()
+            ):
+                for attack in tuple(flights):
+                    if (
+                        attack.aura_strike is not None
+                        and attack.due_at <= current_time
+                    ):
+                        self._remove_pending_monster_attack(actor_id, attack)
             for actor_id, attack in tuple(self.pending_monster_attacks.items()):
                 definition = attack.definition or self.monsters[actor_id].attack
                 if (
