@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import sqlite3
 
 from dso_server.runtime.context import *
 from dso_server.runtime.admin_commands import track_inventory_reward
 from dso_server.runtime.transport import Session
 from dso_server.services.events import EVENT_NOTIFICATION_KIND
 from dso_server.protocol.shop_protocol import OFFER_COMMAND
+from dso_server.protocol.commerce_protocol import PurchasePrice
 
 
 def _transaction_touches_npc_gates(template_ids) -> bool:
@@ -370,7 +372,7 @@ class CommerceService:
     @staticmethod
     def _ocp_booking_notification(instance_guid, reward):
         return make_notification_entry(
-            OCP_BOOKING_NOTIFICATION_KIND,
+            ocp_booking_notification_kind(reward),
             instance_guid,
             OCP_BOOKING_NOTIFICATION_VALUES,
             ocp_booking_notification_payload(reward, instance_guid),
@@ -401,6 +403,11 @@ class CommerceService:
                 'ocp-booking-notification-'
                 'ocp-booking-notification'
             ),
+        )
+        print(
+            f'[{GAMEPLAY_SERVICE_NAME}] sent OCP booking notification '
+            f'kind {ocp_booking_notification_kind(reward)} for '
+            f'{instance_guid.hex()} ({reward.item_id})'
         )
 
     def _handle_ocp_booking(self, s: Session, payload: bytes) -> None:
@@ -527,6 +534,9 @@ class CommerceService:
             claims = dict(s.gameplay_timed_offer_purchases)
             if not claims.get(pending_key, 0):
                 return
+            parsed = parse_ocp_booking_pending_key(pending_key)
+            if parsed is None:
+                raise ValueError('invalid pending OCP booking key')
             inventory = copy.deepcopy(s.gameplay_inventory)
             currency = s.gameplay_currency_state
             next_item_id = int(s.gameplay_next_item_id)
@@ -560,6 +570,16 @@ class CommerceService:
                     CURRENCY_CHANGED_COMMAND, currency,
                     LOCAL_PLAYER_ACTOR_ID,
                 ))
+            elif reward.item_id == 'characterStyleEdit':
+                registry = getattr(self, 'account_registry', None)
+                account_id = int(getattr(s, 'account_id', 0) or 0)
+                if registry is None or account_id <= 0:
+                    raise ValueError(
+                        'character change purchases require an authenticated account'
+                    )
+                registry.grant_character_alteration_booking(
+                    account_id, booking_guid=parsed[0]
+                )
             else:
                 if inventory is None:
                     raise ValueError('player inventory is not initialized')
@@ -588,13 +608,13 @@ class CommerceService:
                         LOCAL_PLAYER_ACTOR_ID,
                     ),
                 ))
-            parsed = parse_ocp_booking_pending_key(pending_key)
-            if parsed is None:
-                raise ValueError('invalid pending OCP booking key')
             claims.pop(pending_key, None)
             claims[ocp_booking_completed_key(parsed[0])] = 1
-            packet, packet_bits = encode_server_command_batch(
-                tuple(commands), include_terminator=True
+            packet, packet_bits = (
+                encode_server_command_batch(
+                    tuple(commands), include_terminator=True
+                )
+                if commands else (b'', 0)
             )
             s.gameplay_currency_state = currency
             s.gameplay_inventory = inventory
@@ -603,15 +623,16 @@ class CommerceService:
         CharacterService._request_account_save(
             s, 'OCP booking settled', flush=True
         )
-        s.send_reliable_ordered_split(
-            packet,
-            total_bit_length=packet_bits,
-            track=True,
-            label_prefix=(
-                'ocp-booking-settlement-'
-                'ocp-booking-settlement'
-            ),
-        )
+        if packet:
+            s.send_reliable_ordered_split(
+                packet,
+                total_bit_length=packet_bits,
+                track=True,
+                label_prefix=(
+                    'ocp-booking-settlement-'
+                    'ocp-booking-settlement'
+                ),
+            )
         print(
             f'[{GAMEPLAY_SERVICE_NAME}] settled OCP booking: '
             f'{reward.amount}x {reward.item_id}'
@@ -620,7 +641,7 @@ class CommerceService:
     def _handle_notification_action(
             self, s: Session, payload: bytes) -> None:
         action = decode_notification_action(payload)
-        if action.kind == OCP_BOOKING_NOTIFICATION_KIND:
+        if action.kind in (OCP_BOOKING_NOTIFICATION_KIND, 12):
             # CMS grants are already applied. Their receipt-only acknowledgement
             # must never enter the premium-store reward settlement path.
             from dso_server.services.admin_live import BOOKING_GUID_PREFIX
@@ -662,6 +683,12 @@ class CommerceService:
                 raise ValueError('unknown OCP booking notification')
             pending_key, offer_id = pending
             reward = resolve_ocp_booking_reward(offer_id, 'external')
+            expected_kind = ocp_booking_notification_kind(reward)
+            if action.kind != expected_kind:
+                raise ValueError(
+                    f'OCP booking notification kind {action.kind} does not '
+                    f'match expected kind {expected_kind}'
+                )
             expected_payload = ocp_booking_notification_payload(
                 reward, action.instance_guid
             )
@@ -903,8 +930,6 @@ class CommerceService:
             if any(entry.offer_id.startswith("quickbar_") for entry in transaction.entries):
                 # The bar's plus button buys a direct offer without opening
                 # an NPC shop. Validate its tier and price independently.
-                import sqlite3
-                from dso_server.protocol.commerce_protocol import PurchasePrice
                 if len(transaction.entries) != 1 or transaction.field_80:
                     raise ValueError("invalid quickbar extension transaction")
                 entry = transaction.entries[0]
@@ -952,8 +977,171 @@ class CommerceService:
                 CharacterService._request_account_save(s, "quickbar extension purchase", flush=True)
                 return
             if transaction.shop_id != open_shop_id:
+                # The chest's lockpick prompt can submit several lockpick
+                # offer rows (or set the transaction mode bit) without an
+                # NPC shop context. Resolve each submitted offer from static
+                # data and accept this narrow transaction only when every
+                # row is a priced lockpick offer.
+                direct_lockpick_rows = []
+                if transaction.entries:
+                    with sqlite3.connect(
+                        self.static_database_path.resolve().as_uri() + "?mode=ro", uri=True
+                    ) as database:
+                        for entry in transaction.entries:
+                            if entry is None or not 1 <= entry.amount <= 1000:
+                                direct_lockpick_rows = []
+                                break
+                            row = database.execute(
+                                "SELECT PriceRC, Item, Amount FROM _Template_Offer "
+                                "WHERE Id=? COLLATE NOCASE",
+                                (entry.offer_id,),
+                            ).fetchone()
+                            if (
+                                row is None
+                                or str(row[1] or "").casefold() != "lockpick"
+                                or int(row[0] or 0) <= 0
+                            ):
+                                direct_lockpick_rows = []
+                                break
+                            direct_lockpick_rows.append((entry, row))
+                if direct_lockpick_rows:
+                    if inventory is None or currency is None or character is None:
+                        raise ValueError("player inventory is not initialized")
+                    lockpick_count = sum(
+                        max(1, int(row[2] or 1)) * entry.amount
+                        for entry, row in direct_lockpick_rows
+                    )
+                    price = PurchasePrice(rc=sum(
+                        int(row[0]) * entry.amount
+                        for entry, row in direct_lockpick_rows
+                    ))
+                    definition = load_purchase_item_definition(
+                        self.static_database_path, "lockpick",
+                    )
+                    currency, game_currencies, game_currency_update = debit_purchase_currency(
+                        currency, game_currencies, price,
+                        shop_currency_resource=None,
+                    )
+                    mutation = add_purchased_item(
+                        inventory, definition, lockpick_count,
+                        next_item_id=next_item_id,
+                        item_level=max(1, int(character.level)),
+                    )
+                    commands = [
+                        ServerCommand(INVENTORY_INFO_COMMAND, mutation.delta, LOCAL_PLAYER_ACTOR_ID),
+                        ServerCommand(CURRENCY_CHANGED_COMMAND, currency, LOCAL_PLAYER_ACTOR_ID),
+                    ]
+                    if game_currency_update is not None:
+                        commands.append(ServerCommand(
+                            GAME_CURRENCY_CHANGED_COMMAND,
+                            game_currency_update, LOCAL_PLAYER_ACTOR_ID,
+                        ))
+                    commands.extend((
+                        ServerCommand(INVENTORY_INFO_COMMAND, mutation.final, LOCAL_PLAYER_ACTOR_ID),
+                        ServerCommand(CURRENCY_CHANGED_COMMAND, currency, LOCAL_PLAYER_ACTOR_ID),
+                    ))
+                    packet, packet_bits = encode_server_command_batch(
+                        tuple(commands), include_terminator=True,
+                    )
+                    with s.flow_lock:
+                        s.gameplay_currency_state = currency
+                        s.gameplay_game_currencies = game_currencies
+                        s.gameplay_inventory = inventory
+                        s.gameplay_next_item_id = mutation.next_item_id
+                    s.send_reliable_ordered_split(
+                        packet, total_bit_length=packet_bits,
+                        track=True, label_prefix="direct-lockpick-purchase",
+                    )
+                    self._credit_tier_spender_progress(s, price.rc)
+                    self._season_pass_feed(s, "SpendRealCurrency", count=price.rc)
+                    CharacterService._persist_gameplay_session(
+                        self, s, reason="direct lockpick transaction",
+                    )
+                    print(
+                        f"[{GAMEPLAY_SERVICE_NAME}] handled direct lockpick "
+                        f"purchase ({lockpick_count} lockpick(s) for {price.rc} Andermant)"
+                    )
+                    return
+                # Some global offers are submitted directly from the store
+                # without opening an NPC shop. Accept only a single offer
+                # explicitly marked DirectlyBuyOffer in static data; this
+                # covers the Andermant lockpick buttons while preserving the
+                # normal open-shop validation for every other transaction.
+                if len(transaction.entries) == 1 and not transaction.field_80:
+                    direct_entry = transaction.entries[0]
+                    if not 1 <= direct_entry.amount <= 1000:
+                        raise ValueError("transaction amount is outside 1..1000")
+                    with sqlite3.connect(
+                        self.static_database_path.resolve().as_uri() + "?mode=ro", uri=True
+                    ) as database:
+                        row = database.execute(
+                            "SELECT PriceRC, Item, Amount, DirectlyBuyOffer, "
+                            "ScaleToPlayerLevel FROM _Template_Offer WHERE Id=?",
+                            (direct_entry.offer_id,),
+                        ).fetchone()
+                    if (
+                        row is not None
+                        and (row[3] or str(row[1] or "").casefold() == "lockpick")
+                        and int(row[0] or 0) > 0
+                    ):
+                        if inventory is None or currency is None or character is None:
+                            raise ValueError("player inventory is not initialized")
+                        definition = load_purchase_item_definition(
+                            self.static_database_path, str(row[1]),
+                        )
+                        price = PurchasePrice(rc=int(row[0]) * direct_entry.amount)
+                        currency, game_currencies, game_currency_update = debit_purchase_currency(
+                            currency, game_currencies, price,
+                            shop_currency_resource=None,
+                        )
+                        mutation = add_purchased_item(
+                            inventory, definition,
+                            max(1, int(row[2] or 1)) * direct_entry.amount,
+                            next_item_id=next_item_id,
+                            item_level=max(1, int(character.level)),
+                        )
+                        commands = [
+                            ServerCommand(INVENTORY_INFO_COMMAND, mutation.delta, LOCAL_PLAYER_ACTOR_ID),
+                            ServerCommand(CURRENCY_CHANGED_COMMAND, currency, LOCAL_PLAYER_ACTOR_ID),
+                        ]
+                        if game_currency_update is not None:
+                            commands.append(ServerCommand(
+                                GAME_CURRENCY_CHANGED_COMMAND,
+                                game_currency_update, LOCAL_PLAYER_ACTOR_ID,
+                            ))
+                        commands.extend((
+                            ServerCommand(INVENTORY_INFO_COMMAND, mutation.final, LOCAL_PLAYER_ACTOR_ID),
+                            ServerCommand(CURRENCY_CHANGED_COMMAND, currency, LOCAL_PLAYER_ACTOR_ID),
+                        ))
+                        packet, packet_bits = encode_server_command_batch(
+                            tuple(commands), include_terminator=True,
+                        )
+                        with s.flow_lock:
+                            s.gameplay_currency_state = currency
+                            s.gameplay_game_currencies = game_currencies
+                            s.gameplay_inventory = inventory
+                            s.gameplay_next_item_id = mutation.next_item_id
+                        s.send_reliable_ordered_split(
+                            packet, total_bit_length=packet_bits,
+                            track=True, label_prefix="direct-offer-purchase",
+                        )
+                        self._credit_tier_spender_progress(s, price.rc)
+                        self._season_pass_feed(s, "SpendRealCurrency", count=price.rc)
+                        CharacterService._persist_gameplay_session(
+                            self, s, reason="direct offer transaction",
+                        )
+                        print(
+                            f"[{GAMEPLAY_SERVICE_NAME}] handled direct offer "
+                            f"{direct_entry.offer_id!r}: delivered "
+                            f"{[(item.template_id, item.amount) for item in mutation.changed_items]} "
+                            f"for {price.rc} Andermant"
+                        )
+                        return
                 raise ValueError(
-                    "transaction does not match the currently opened shop"
+                    "transaction does not match the currently opened shop "
+                    f"(transaction_shop={transaction.shop_id!r}, "
+                    f"open_shop={open_shop_id!r}, field_80={transaction.field_80}, "
+                    f"entries={[(entry.offer_id, entry.amount) if entry else None for entry in transaction.entries]!r})"
                 )
             if (
                 inventory is None

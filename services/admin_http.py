@@ -1,6 +1,7 @@
 """Small, same-origin HTTP boundary for the admin CMS (standard library only)."""
 
 import hmac
+import ipaddress
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -101,7 +102,7 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             path = parsed.path
             self._origin()
             assets = {"/": ("index.html", "text/html"), "/admin.css": ("admin.css", "text/css")}
-            for name in ("admin.js", "admin_ui.js", "admin_pages.js", "admin_character.js", "admin_booking.js", "admin_live.js", "admin_events.js", "admin_shops.js", "admin_season_pass.js"):
+            for name in ("admin.js", "admin_ui.js", "admin_pages.js", "admin_character.js", "admin_booking.js", "admin_live.js", "admin_events.js", "admin_shops.js", "admin_season_pass.js", "admin_loot.js"):
                 assets["/" + name] = (name, "text/javascript")
             if not write and path in assets:
                 name, kind = assets[path]
@@ -116,6 +117,8 @@ class AdminRequestHandler(BaseHTTPRequestHandler):
             token = self._token()
             account, session = self.service.authenticate(token)
             if write:
+                if path.endswith("/launch") and not ipaddress.ip_address(self.client_address[0]).is_loopback:
+                    raise AdminError(403, "local game launch must be requested from this computer")
                 csrf = self.headers.get("X-CSRF-Token", "")
                 if not hmac.compare_digest(csrf, session["csrf"]):
                     raise AdminError(403, "invalid CSRF token; reload the page")
