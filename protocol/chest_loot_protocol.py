@@ -28,6 +28,10 @@ import sqlite3
 from typing import Any
 
 from dso_server.runtime import resident_content
+from dso_server.gameplay.mystic_cube_config import (
+    CONTENT_KEYS,
+    cube_content_weights,
+)
 from dso_server.paths import DEFAULT_CHEST_CONTENTS_MAP, DESCRIPTION_CHEST_CONTENTS_MAP
 
 from dso_server.protocol.commerce_protocol import (
@@ -40,6 +44,7 @@ from dso_server.protocol.inventory_codec import InventoryInfo
 from dso_server.protocol.inventory_economy_protocol import (
     InventoryMutationBuilder,
     credit_currency_template,
+    credit_fixed_currency,
     refresh_inventory_economy_values,
 )
 from dso_server.protocol.player_init_protocol import CurrencyChanged
@@ -66,10 +71,16 @@ _RARITY_HINT = re.compile(
 _LEVEL_SUFFIX = re.compile(r"(?:^|_)Lv(\d+)$", re.IGNORECASE)
 _ADVENTURER_CHEST_LEVEL = re.compile(r"^levelchest_lvl_?(\d+)$", re.IGNORECASE)
 _LYDIAS_GRACE_LEVEL = re.compile(r"^ancestral_books_lv(\d+)$")
-# Andermant paid by each Lydia's Grace box, keyed by the box's level. No
-# client data ships the amounts; they scale with the level up to the
-# 100,000 of the last box.
-_LYDIAS_GRACE_ANDERMANT = {level: level * 1000 for level in range(10, 101, 10)}
+# The ten Lydia's Grace boxes, level 10 to 100. No client data ships their
+# loot lists; the official Ancestral Ruins article states that each opening
+# levels the box by 10 and pays Polished Dragon Scales, and that the tenth
+# opening also pays a Statue of Abundance.
+# UNVERIFIED: the article does not state how many scales an opening pays, so
+# one is given. Each scale is "consumed when used" for 5 to 15 random
+# Andermant, as its own description says.
+_LYDIAS_GRACE_LEVELS = tuple(range(10, 101, 10))
+_LYDIAS_GRACE_SCALES = 1
+_LYDIAS_GRACE_FINAL_REWARD = "wealth_stone_carving"
 _RARITY_NAMES = {
     "common": "Common",
     "uncommon": "Uncommon",
@@ -135,6 +146,95 @@ _CHEST_CATEGORIES = frozenset({
     "LootGenItem", "LootGenItemAutoIdent", "LotteryTicket",
 })
 
+
+@dataclass(frozen=True)
+class _MysticCubeTier:
+    """Authored payout and gem ladder for one Mystic Cube tier."""
+
+    gold: int
+    glyph: int
+    wisdom: int
+    gem_ranks: tuple[str, ...]
+
+
+# One weighted choice per cube (Integer boundaries, total 100):
+# unique 15, class set 22, gold 15, Ancient Wisdom 15, Glyph 15, gem 15,
+# andermant 3.
+_MYSTIC_CUBE_TIERS = {
+    "mystic_cube_common": _MysticCubeTier(19, 99, 5, ("a", "b", "c")),
+    "mystic_cube_uncommon": _MysticCubeTier(50, 199, 5, ("b", "c", "d")),
+    "mystic_cube_magic": _MysticCubeTier(199, 299, 10, ("d", "e", "f")),
+    "mystic_cube_rare": _MysticCubeTier(499, 499, 15, ("d", "e", "f", "g", "h")),
+    "mystic_cube_epic": _MysticCubeTier(999, 999, 20, ("e", "f", "g", "h", "i", "j")),
+}
+_MYSTIC_CUBE_ANDERMANT = 999
+_MYSTIC_CUBE_SHARED_UNIQUES = (
+    "pet_fat_demon",             # Horned Fire Gnome
+    "pet_raptor_01",             # Little Raptor
+    "pet_rooster",               # Fire Rooster
+    "pet_fennec",                # Fennec
+    "emote_psy",                 # Dracanian Style
+    "costume_skeleton_02",       # Glowing Bone Man Costume
+    "costume_skeleton_03",       # Armored Skeleton Costume
+    "epicmount_rocket_02",       # Firework Rocket
+    "epicmount_indian_rhino_01", # Rash Rhino
+    "epicmount_scorpion_01",     # Black War Scorpion
+    "epicmount_jumong_horse_01", # The Legendary King's War Horse
+)
+# The premium trader's three uniques, one set per class.
+_MYSTIC_CUBE_PREMIUM_UNIQUES = {
+    "warrior": (
+        "warrior_unique_2h_mace_premium_01",
+        "warrior_unique_lh_shield_premium_01",
+        "warrior_unique_shoulders_premium_01",
+    ),
+    "ranger": (
+        "ranger_unique_2h_bow_premium_01",
+        "ranger_unique_lh_offensequiver_premium_01",
+        "ranger_unique_shoulders_premium_01",
+    ),
+    "mage": (
+        "mage_unique_2h_staff_premium_01",
+        "mage_unique_lh_book_premium_01",
+        "mage_unique_shoulders_premium_01",
+    ),
+    "dwarf": (
+        "dwarf_unique_2h_rifle_premium_01",
+        "dwarf_unique_lh_wrench_premium_01",
+        "dwarf_unique_shoulders_premium_01",
+    ),
+}
+_MYSTIC_CUBE_SET_PIECES = {
+    "warrior": (
+        "warrior_unique_amulet_mysticcube_set_02",
+        "warrior_unique_ring_mysticcube_set_02",
+        "warrior_unique_weaponmodifier_mysticcube_set_02",
+        "warrior_unique_rh_mace_mysticcube_set_02",
+        "warrior_unique_lh_shield_mysticcube_set_02",
+    ),
+    "ranger": (
+        "ranger_unique_amulet_mysticcube_set_02",
+        "ranger_unique_ring_mysticcube_set_02",
+        "ranger_unique_weaponmodifier_mysticcube_set_02",
+        "ranger_unique_rh_longbow_mysticcube_set_02",
+        "ranger_unique_lh_defensequiver_mysticcube_set_02",
+    ),
+    "mage": (
+        "mage_unique_amulet_mysticcube_set_02",
+        "mage_unique_ring_mysticcube_set_02",
+        "mage_unique_weaponmodifier_mysticcube_set_02",
+        "mage_unique_rh_staff_mysticcube_set_02",
+        "mage_unique_lh_orb_mysticcube_set_02",
+    ),
+    "dwarf": (
+        "dwarf_unique_amulet_mysticcube_set_02",
+        "dwarf_unique_ring_mysticcube_set_02",
+        "dwarf_unique_weaponmodifier_mysticcube_set_02",
+        "dwarf_unique_rh_pistol_mysticcube_set_02",
+        "dwarf_unique_lh_absorber_mysticcube_set_02",
+    ),
+}
+
 # Boxes whose chest_contents.json record is wrong, written from each box's
 # own description: the Thanksgiving records lost their first line, the
 # packages hold their offer bundle's text, the Undefeatable starter pack's
@@ -199,7 +299,132 @@ _AUTHORED_CHEST_CONTENTS: dict[str, tuple[tuple[str, int], ...]] = {
     ),
     "e_ide_02_progress_package": (("event_identify_drop_crystal_piece_02", 40),),
     "dragan_event_attire_skin": (("skin_{back}_unique_backitem_attire_dragan_01", 1),),
+    # Treasure-map relics: "Consumed when used" for the stated currency.
+    "perforated_dragon_scale": (("money_vc_gold", 5),),
+    "perforated_dragon_bone": (("money_vc_gold", 10),),
+    "perforated_dragon_tooth": (("money_rc", 100),),
+    "motley_glass_plate": (("community_coins", 10),),
+    "motley_glass_bowl": (("community_coins", 50),),
+    "three_hole_bone_flute": (("e_chr_2012_event_currency", 20),),
+    "five_hole_bone_flute": (("e_chr_2012_event_currency", 100),),
+    "seven_hole_bone_flute": (("e_chr_2012_event_currency", 500),),
+    # "Once open, it gives you a 100% chance for a complete Dragon Stone."
+    "dragon_crystal_box": (("e_bgh_ancestors_soul", 1),),
 }
+
+# Boxes whose server-side loot lists no client data ships and whose own
+# descriptions state odds that chest_contents_descriptions.json could not
+# parse. A weighted table (odds sum to 100) yields exactly one reward; a roll
+# table rolls every entry independently.
+# UNVERIFIED: the 6-month Premium Membership has no item row; six one-month
+# teasers (180 days) are given. The community coin draw gives a random
+# 100/50/40/20 (the description lists the four without odds).
+# Fool's Lucky Gift only says "you have a chance to receive one of the
+# following items", with no odds: the eight mounts are drawn evenly.
+_AUTHORED_WEIGHTED_CHESTS: dict[str, tuple[tuple[str, int, float], ...]] = {
+    "event_fools_lucky_gift": (
+        ("mythical_mount_skeleton_dragon_01_3d", 1, 12.5),
+        ("epicmount_ghost_02_1d", 1, 12.5),
+        ("epicmount_ghost_01_1d", 1, 12.5),
+        ("epicmount_wealth_ston_doll_1d", 1, 12.5),
+        ("epicmount_ghost_bone_horse_1d", 1, 12.5),
+        ("epicmount_ghost_bone_monoceros_1d", 1, 12.5),
+        ("epicmount_valentines_day_chair_1d", 1, 12.5),
+        ("epicmount_chaos_dragon_01_1d", 1, 12.5),
+    ),
+    "item_lootbox_lucky_bag_2024": (
+        ("item_lootbox_glitter_clover", 1, 0.1),
+        ("ingredient_rune_resistance_ice_fire_light", 1, 0.2),
+        ("jewel_buff_lords_magic", 1, 0.2),
+        ("jewel_boss_gem_drop_common", 1, 0.15),
+        ("jewel_ingredient_find_common", 1, 0.15),
+        ("premium_teaser_one_month", 6, 0.2),
+        ("lootbox_level_rallye_jewels_random", 1, 1.5),
+        ("money_rc", 5000, 1.0),
+        ("@community_coins", 1, 66.5),
+        ("mortis_key", 2, 10.0),
+        ("ce_darkforce_key", 2, 10.0),
+        ("pw_enter_locked_difficulty_key", 40, 10.0),
+    ),
+}
+# Boxes that pay a fixed list and then draw one bonus from a weighted table.
+# "You also have a chance to receive one of the following items" (the odds
+# sum to 100, so exactly one bonus).
+# UNVERIFIED: the Challenge Pass Package is a shop offer with no item row;
+# its offer's contents (10 Challenge Pass + 10 Blue Dragon Package) are given.
+_AUTHORED_BONUS_CHESTS: dict[
+    str,
+    tuple[
+        tuple[tuple[str, int], ...],
+        tuple[tuple[str, int, float], ...],
+    ],
+] = {
+    "immortal_relic_chest": (
+        (("event_fools_lucky_gift", 1), ("item_season_pass_experience", 5)),
+        (
+            ("ancestors_molten_chest", 1, 25.0),
+            ("season_pass_chest", 1, 25.0),
+            ("e_cny_boss_essence_04", 1999, 25.0),
+            ("ce2024_black_dragon_mount", 1, 20.0),
+            ("@challenge_pass_package", 1, 5.0),
+        ),
+    ),
+}
+_AUTHORED_REWARD_EXPANSIONS: dict[str, tuple[tuple[str, int], ...]] = {
+    "@challenge_pass_package": (
+        ("endlesstower_key", 10), ("ce2024_blue_dragon_mount", 10),
+    ),
+}
+_COMMUNITY_COIN_AMOUNTS = (100, 50, 40, 20)
+# Items consumed for a random amount of one currency stated in their own
+# description: template id -> (currency, minimum, maximum).
+_AUTHORED_RANDOM_CHESTS: dict[str, tuple[str, int, int]] = {
+    # "Use it to get 5 to 15 random Andermants."
+    "polished_squama": ("money_rc", 5, 15),
+}
+_AUTHORED_ROLL_CHESTS: dict[str, tuple[tuple[str, int, float], ...]] = {
+    "ancestor_treasure_map": (
+        ("perforated_dragon_scale", 1, 100.0),
+        ("perforated_dragon_bone", 1, 80.0),
+        ("perforated_dragon_tooth", 1, 5.0),
+        ("motley_glass_plate", 1, 10.0),
+        ("motley_glass_bowl", 1, 2.0),
+        ("motley_glass_cup", 1, 0.1),
+        ("three_hole_bone_flute", 1, 25.0),
+        ("five_hole_bone_flute", 1, 5.0),
+        ("seven_hole_bone_flute", 1, 1.0),
+        ("e_bgh_ancestors_soul", 1, 2.0),
+        ("ancestral_books_lv10", 1, 10.0),
+        ("@harvest_horn", 1, 0.5),
+        ("@golden_goose", 1, 2.0),
+        ("magic_lamp_1_filthy_1", 1, 0.2),
+        ("magic_dragon_egg_fossil", 1, 0.1),
+        ("dragon_blood_box", 1, 5.0),
+        ("dragon_crystal_box", 1, 1.0),
+        ("money_rc", 1000, 50.0),
+        ("money_rc", 2000, 100.0),
+        ("money_rc", 4000, 5.0),
+        ("money_rc", 6000, 3.0),
+        ("money_rc", 8000, 1.0),
+        ("money_rc", 10000, 0.6),
+    ),
+}
+# The description lists categories, not amounts: give one random basic
+# ingredient (Bottle/Vial/Flask/Filter Paper, any rarity) and one Multitool.
+# The region chests ("Crafting Chest: Duria") list formulas instead, so they
+# are not served these contents. UNVERIFIED: the amounts and the odds.
+_CRAFTING_CHEST_TEMPLATES = frozenset({"crafting_quest_reward_box"})
+_CRAFTING_CHEST_CONTENTS = (
+    ("@basic_ingredient", 1, 100.0),
+    ("crafting_stateobject_key", 1, 100.0),
+)
+_BASIC_INGREDIENTS = tuple(
+    f"basic_ingredient_{family}_rarity_{rarity:02d}"
+    for family in ("buff", "elixir", "potion", "tonic")
+    for rarity in range(1, 6)
+)
+_HARVEST_HORN_LEVELS = (20, 40, 60, 80, 100)
+_GOLDEN_GOOSE_LEVELS = tuple(range(50, 100, 5))
 
 
 def _unresolved_contents(category: str, message: str) -> ValueError:
@@ -215,6 +440,10 @@ class ChestReward:
     item_level: int | None = None
     rarity: int | None = None
     appearance: str = ""
+    # Authored rewards that must bypass the template-name mapping: "glyph"
+    # credits the client's Glyph of Power field, "wisdom" is applied to the
+    # Knowledge progression by the caller.
+    fixed_currency: str = ""
 
 
 @dataclass(frozen=True)
@@ -236,6 +465,7 @@ class ChestOpenMutation:
     delta: InventoryInfo
     final: InventoryInfo
     next_item_id: int
+    wisdom_amount: int = 0
 
 
 @dataclass(frozen=True)
@@ -1109,6 +1339,221 @@ def _authored_chest_contents(
     )
 
 
+def _level_scaled_template(
+    prefix: str, levels: tuple[int, ...], player_level: int,
+) -> str:
+    eligible = [level for level in levels if level <= int(player_level)]
+    return f"{prefix}{eligible[-1] if eligible else levels[0]}"
+
+
+def _authored_reward_template(
+    template_id: str, *, player_level: int, rng: random.Random,
+) -> str:
+    if template_id == "@harvest_horn":
+        return _level_scaled_template(
+            "horn_of_harvest_lv", _HARVEST_HORN_LEVELS, player_level,
+        )
+    if template_id == "@golden_goose":
+        return _level_scaled_template(
+            "golden_goose_Lv", _GOLDEN_GOOSE_LEVELS, player_level,
+        )
+    if template_id == "@basic_ingredient":
+        return rng.choice(_BASIC_INGREDIENTS)
+    return template_id
+
+
+def _authored_reward_entries(
+    entry: _MappedReward, *, player_level: int, rng: random.Random,
+) -> tuple[tuple[str, int], ...]:
+    """(template id, amount) for one rolled entry, expanding placeholders."""
+
+    expansion = _AUTHORED_REWARD_EXPANSIONS.get(entry.template_id)
+    if expansion is not None:
+        return expansion
+    if entry.template_id == "@community_coins":
+        return (("community_coins", rng.choice(_COMMUNITY_COIN_AMOUNTS)),)
+    return ((
+        _authored_reward_template(
+            entry.template_id, player_level=player_level, rng=rng,
+        ),
+        entry.amount,
+    ),)
+
+
+def _authored_chance_contents(
+    static_database_path: str | Path,
+    box_definition: PurchaseItemDefinition,
+    *,
+    player_level: int,
+    rng: random.Random,
+) -> ChestContents | None:
+    """Roll a box written in the authored weighted/bonus/roll tables."""
+
+    template_id = box_definition.template_id
+    random_payout = _AUTHORED_RANDOM_CHESTS.get(template_id)
+    if random_payout is not None:
+        if int(player_level) < int(box_definition.required_level):
+            raise ValueError(
+                f"container {template_id!r} requires level "
+                f"{int(box_definition.required_level)}"
+            )
+        currency, minimum, maximum = random_payout
+        return ChestContents(
+            box_template_id=template_id,
+            source="authored_random_chest",
+            rewards=(ChestReward(
+                _definition(static_database_path, currency),
+                rng.randint(int(minimum), int(maximum)),
+            ),),
+            used_tooltip_mapping=False,
+        )
+    weighted = _AUTHORED_WEIGHTED_CHESTS.get(template_id)
+    bonus = _AUTHORED_BONUS_CHESTS.get(template_id)
+    rolls = _AUTHORED_ROLL_CHESTS.get(template_id)
+    source = "authored_roll_chest"
+    if weighted is not None:
+        source = "authored_weighted_chest"
+    elif bonus is not None:
+        source = "authored_bonus_chest"
+    elif rolls is None:
+        if template_id not in _CRAFTING_CHEST_TEMPLATES:
+            return None
+        rolls = _CRAFTING_CHEST_CONTENTS
+        source = "authored_crafting_chest"
+    if int(player_level) < int(box_definition.required_level):
+        raise ValueError(
+            f"container {template_id!r} requires level "
+            f"{int(box_definition.required_level)}"
+        )
+    if weighted is not None:
+        selected = [_pick_weighted(
+            [_MappedReward(item, amount, chance) for item, amount, chance in weighted],
+            rng,
+        )]
+    elif bonus is not None:
+        fixed, table = bonus
+        selected = [
+            _MappedReward(item, amount) for item, amount in fixed
+        ] + [_pick_weighted(
+            [_MappedReward(item, amount, chance) for item, amount, chance in table],
+            rng,
+        )]
+    else:
+        selected = [
+            _MappedReward(item, amount, chance)
+            for item, amount, chance in rolls
+            if rng.random() * 100.0 < chance
+        ]
+    rewards = tuple(
+        ChestReward(_definition(static_database_path, reward_template_id), amount)
+        for entry in selected
+        for reward_template_id, amount in _authored_reward_entries(
+            entry, player_level=player_level, rng=rng,
+        )
+    )
+    if not rewards:
+        raise ValueError(
+            f"container {template_id!r} rolled no reward"
+        )
+    return ChestContents(
+        box_template_id=template_id,
+        source=source,
+        rewards=rewards,
+        used_tooltip_mapping=False,
+    )
+
+
+def _mystic_cube_contents(
+    static_database_path: str | Path,
+    box_definition: PurchaseItemDefinition,
+    *,
+    player_level: int,
+    class_name: str,
+    rng: random.Random,
+) -> ChestContents | None:
+    """Roll one Mystic Cube: a single weighted category, never a stack.
+
+    The database authors the cube tiers but not their contents, so the table
+    below is the authority for both payout and gem ranks.
+    """
+
+    tier = _MYSTIC_CUBE_TIERS.get(box_definition.template_id)
+    if tier is None:
+        return None
+    if int(player_level) < int(box_definition.required_level):
+        raise ValueError(
+            f"container {box_definition.template_id!r} requires level "
+            f"{int(box_definition.required_level)}"
+        )
+    class_name = str(class_name).casefold()
+    if class_name not in _MYSTIC_CUBE_SET_PIECES:
+        raise ValueError(
+            f"mystic cube {box_definition.template_id!r} requires a valid "
+            "player class"
+        )
+
+    weights = cube_content_weights(box_definition.template_id)
+    roll = rng.randrange(100)
+    cumulative = 0
+    category = CONTENT_KEYS[-1]
+    for key in CONTENT_KEYS:
+        cumulative += weights[key]
+        if roll < cumulative:
+            category = key
+            break
+
+    if category == "unique":
+        pool = (
+            _MYSTIC_CUBE_SHARED_UNIQUES
+            + _MYSTIC_CUBE_PREMIUM_UNIQUES[class_name]
+        )
+        reward = ChestReward(
+            _definition(static_database_path, rng.choice(pool)), 1
+        )
+    elif category == "set":
+        reward = ChestReward(
+            _definition(
+                static_database_path,
+                rng.choice(_MYSTIC_CUBE_SET_PIECES[class_name]),
+            ),
+            1,
+        )
+    elif category == "gold":
+        reward = ChestReward(
+            _definition(static_database_path, "money_vc_gold"),
+            int(tier.gold),
+        )
+    elif category == "wisdom":
+        reward = ChestReward(
+            _definition(static_database_path, "money_gc"),
+            int(tier.wisdom),
+            fixed_currency="wisdom",
+        )
+    elif category == "glyph":
+        reward = ChestReward(
+            _definition(static_database_path, "money_uc_no_auto_use"),
+            int(tier.glyph),
+            fixed_currency="glyph",
+        )
+    elif category == "gem":
+        rank = rng.choice(tier.gem_ranks)
+        family = rng.choice(_STANDARD_GEM_FAMILIES)
+        reward = ChestReward(
+            _definition(static_database_path, f"gem_{family}_{rank}"), 1
+        )
+    else:
+        reward = ChestReward(
+            _definition(static_database_path, "money_rc"),
+            _MYSTIC_CUBE_ANDERMANT,
+        )
+    return ChestContents(
+        box_template_id=box_definition.template_id,
+        source="mystic_cube",
+        rewards=(reward,),
+        used_tooltip_mapping=False,
+    )
+
+
 def _lydias_grace_contents(
     static_database_path: str | Path,
     box_definition: PurchaseItemDefinition,
@@ -1119,16 +1564,18 @@ def _lydias_grace_contents(
 
     The ten ``ancestral_books_lv*`` boxes name server-side loot lists that no
     client data ships; their descriptions only say the box "contains endless
-    money" and "can be used at level N". Each box pays its level's Andermant
-    plus the box ten levels up; the level 100 box ends the chain.
+    money" and "can be used at level N". The official Ancestral Ruins article
+    states that each opening levels the box by 10 and pays Polished Dragon
+    Scales, and that reaching level 100 also pays a Statue of Abundance.
+    Each box therefore pays its scales plus the box ten levels up; the level
+    100 box ends the chain with the statue instead.
     """
 
     match = _LYDIAS_GRACE_LEVEL.fullmatch(box_definition.template_id)
     if match is None:
         return None
     level = int(match.group(1))
-    andermant = _LYDIAS_GRACE_ANDERMANT.get(level)
-    if andermant is None:
+    if level not in _LYDIAS_GRACE_LEVELS:
         return None
     # RequiredLevel is the client's own gate and matches the description.
     required_level = max(level, int(box_definition.required_level))
@@ -1137,11 +1584,19 @@ def _lydias_grace_contents(
             f"container {box_definition.template_id!r} requires level "
             f"{required_level}"
         )
-    rewards = [ChestReward(_definition(static_database_path, "money_rc"), andermant)]
-    if level + 10 in _LYDIAS_GRACE_ANDERMANT:
+    rewards = [ChestReward(
+        _definition(static_database_path, "polished_squama"),
+        _LYDIAS_GRACE_SCALES,
+    )]
+    next_level = level + 10
+    if next_level in _LYDIAS_GRACE_LEVELS:
         rewards.append(ChestReward(
-            _definition(static_database_path, f"ancestral_books_lv{level + 10}"),
+            _definition(static_database_path, f"ancestral_books_lv{next_level}"),
             1,
+        ))
+    else:
+        rewards.append(ChestReward(
+            _definition(static_database_path, _LYDIAS_GRACE_FINAL_REWARD), 1,
         ))
     return ChestContents(
         box_template_id=box_definition.template_id,
@@ -1182,12 +1637,28 @@ def roll_chest_contents(
     )
     if lydias_grace is not None:
         return lydias_grace
+    mystic_cube = _mystic_cube_contents(
+        static_database_path,
+        box_definition,
+        player_level=player_level,
+        class_name=class_name,
+        rng=rng or random.SystemRandom(),
+    )
+    if mystic_cube is not None:
+        return mystic_cube
     authored = _authored_chest_contents(
         static_database_path, box_definition,
         player_level=player_level, class_name=class_name,
     )
     if authored is not None:
         return authored
+    chance_authored = _authored_chance_contents(
+        static_database_path, box_definition,
+        player_level=player_level,
+        rng=rng or random.SystemRandom(),
+    )
+    if chance_authored is not None:
+        return chance_authored
     # A box whose loot list is server-side only and that chest_contents.json
     # lacks or cannot resolve: what its description lists, or the category
     # it names (tools/chest_contents_from_descriptions.py).
@@ -1417,7 +1888,22 @@ def open_mapped_chest(
     updated_game_currencies = dict(game_currencies)
     game_updates: dict[str, GameCurrencyChanged] = {}
     fixed_currency_changed = False
+    wisdom_amount = 0
     for reward in contents.rewards:
+        if reward.fixed_currency == "wisdom":
+            wisdom_amount += int(reward.amount)
+            continue
+        if reward.fixed_currency == "glyph":
+            updated_currency = credit_fixed_currency(
+                updated_currency, glyph=int(reward.amount)
+            )
+            fixed_currency_changed = True
+            continue
+        if reward.fixed_currency:
+            raise ValueError(
+                f"unknown fixed currency {reward.fixed_currency!r} on "
+                f"container {contents.box_template_id!r}"
+            )
         credit = credit_currency_template(
             static_database_path,
             updated_currency,
@@ -1505,6 +1991,7 @@ def open_mapped_chest(
         delta=mutation.delta,
         final=mutation.final,
         next_item_id=mutation.next_item_id,
+        wisdom_amount=wisdom_amount,
     )
 
 

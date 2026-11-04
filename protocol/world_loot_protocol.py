@@ -51,6 +51,10 @@ from dso_server.protocol.currency_protocol import (
 )
 from dso_server.protocol.player_init_protocol import CurrencyChanged
 from dso_server.gameplay.item_economy_values import equipment_melt_value, item_stack_vc_value
+from dso_server.gameplay.mystic_cube_config import (
+    DEFAULT_DROP_CHANCE_PERCENT,
+    cube_drop_chance,
+)
 
 
 NEW_ITEM_COMMAND = command_id("Commands::NewItemCommand", 0x002D)
@@ -65,6 +69,22 @@ GOLD_ITEM_TEMPLATES = frozenset(("money_vc", "money_vc_gold"))
 ANDERMANT_ITEM_TEMPLATE = "money_rc"
 WISDOM_ITEM_TEMPLATE = "money_gc"
 ANDERMANT_BASE_DROP_MULTIPLIER = 50
+# Mystic Cubes drop from members only, at a flat rate per kill that is
+# deliberately independent of the map's drop and stack scaling. The CMS
+# configuration supplies the effective rate; this constant is the default.
+MYSTIC_CUBE_DROP_CHANCE = DEFAULT_DROP_CHANCE_PERCENT / 100.0
+MYSTIC_CUBE_TEMPLATES_BY_DIFFICULTY = (
+    "mystic_cube_common",      # 0 Normal
+    "mystic_cube_common",      # 1 Painful
+    "mystic_cube_uncommon",    # 2 Excruciating
+    "mystic_cube_uncommon",    # 3 Fatal
+    "mystic_cube_magic",       # 4 Infernal
+    "mystic_cube_magic",       # 5 Parallel World Infernal
+    "mystic_cube_rare",        # 6 Merciless
+    "mystic_cube_rare",        # 7 Parallel World Merciless
+    "mystic_cube_epic",        # 8 Bloodshed
+    "mystic_cube_epic",        # 9 Parallel World Bloodshed
+)
 # Healing spheres: the authored rank lists drop them at 1% (monster), 5%
 # (add), 20% (guardian), 35% (champion) and 50% (leader), so a fight almost
 # never produced one. Server policy floors every globe roll: a normal monster
@@ -144,6 +164,54 @@ TOP_MAP_DIFFICULTIES = frozenset((8, 9))
 # a rank closer than this to the end of the gem ladder.
 MONSTER_GEM_RANK_REDUCTION = 5
 BEST_MONSTER_GEM_CHANCE = 0.05
+CRAFTING_DUNGEON_ACCESS_PREFIX = "b1205_crafting_dun"
+CRAFTING_DUNGEON_LEADER_TEMPLATE = "b1205_ingredient_leader_cerberus_01"
+CRAFTING_DUNGEON_JEWEL_TEMPLATE = "jewel_ingredient_find_common"
+CRAFTING_DUNGEON_MOUNT_TEMPLATES = (
+    "epicmount_lizard_crafting_01",
+    "epicmount_lizard_crafting_02",
+)
+CRAFTING_DUNGEON_JEWEL_DROP_CHANCE = 0.05
+CRAFTING_DUNGEON_MOUNT_DROP_CHANCE = 0.15
+
+
+def _is_crafting_dungeon_access(map_access_id: str) -> bool:
+    access_id = str(map_access_id).casefold()
+    return (
+        access_id == CRAFTING_DUNGEON_ACCESS_PREFIX
+        or access_id.startswith(CRAFTING_DUNGEON_ACCESS_PREFIX + "_")
+    )
+
+
+def _roll_crafting_dungeon_special_rewards(
+    map_access_id: str,
+    monster_template_id: str,
+    listed_reward_ids,
+    rng,
+    *,
+    force_drops: bool = False,
+) -> tuple[str, ...]:
+    """Roll Glowing Cave's leader-only jewel and mount rewards."""
+
+    if (
+        not _is_crafting_dungeon_access(map_access_id)
+        or str(monster_template_id).casefold()
+        != CRAFTING_DUNGEON_LEADER_TEMPLATE
+    ):
+        return ()
+    listed = {str(value).casefold() for value in listed_reward_ids}
+    rewards = []
+    jewel = CRAFTING_DUNGEON_JEWEL_TEMPLATE
+    if jewel in listed and (
+        force_drops or rng.random() < CRAFTING_DUNGEON_JEWEL_DROP_CHANCE
+    ):
+        rewards.append(jewel)
+    for mount in CRAFTING_DUNGEON_MOUNT_TEMPLATES:
+        if mount.casefold() in listed and (
+            force_drops or rng.random() < CRAFTING_DUNGEON_MOUNT_DROP_CHANCE
+        ):
+            rewards.append(mount)
+    return tuple(rewards)
 
 
 @dataclass(frozen=True)
@@ -2278,6 +2346,14 @@ def _scatter_positions(
     return tuple(positions)
 
 
+def mystic_cube_template_for_difficulty(map_difficulty: int) -> str:
+    """Pick the cube tier for a runtime map difficulty (0..9)."""
+
+    ladder = MYSTIC_CUBE_TEMPLATES_BY_DIFFICULTY
+    index = max(0, min(len(ladder) - 1, int(map_difficulty)))
+    return ladder[index]
+
+
 def generate_monster_loot(
     static_database_path: str | Path,
     template_id: str,
@@ -2290,6 +2366,7 @@ def generate_monster_loot(
     rng: random.Random | None = None,
     force_drops: bool = False,
     wisdom_eligible: bool = False,
+    member_mystic_cube_eligible: bool = False,
     map_difficulty: int = 0,
     map_access_id: str = "",
     extra_boss_gems: int = 0,
@@ -2488,6 +2565,10 @@ def generate_monster_loot(
                 class_name,
                 equipment_item_level,
             )
+            crafting_special_reward_ids = frozenset((
+                CRAFTING_DUNGEON_JEWEL_TEMPLATE,
+                *CRAFTING_DUNGEON_MOUNT_TEMPLATES,
+            )) if _is_crafting_dungeon_access(map_access_id) else frozenset()
             region_uniques = _region_unique_definitions(
                 database,
                 map_access_id,
@@ -2546,6 +2627,8 @@ def generate_monster_loot(
                         "DefaultRarity"
                     ) or ""
                 ).casefold() not in {"unique", "set"}
+                and definition.template_id.casefold()
+                not in crafting_special_reward_ids
             )
             if direct_candidates and (
                 force_drops
@@ -2559,6 +2642,32 @@ def generate_monster_loot(
                     equipment_item_level,
                     "",
                     _rarity_index(row.get("DefaultRarity"), 0),
+                ))
+
+            # The Glowing Cave's authored Possible Rewards include one
+            # Ingredient Hunter jewel and two crafting lizard mounts. Retail
+            # preview data names the items but contains no server-side odds;
+            # roll the jewel at its configured special rate and each listed
+            # mount independently at 15% from Cerberus only, outside the
+            # ordinary difficulty curves.
+            special_reward_ids = _roll_crafting_dungeon_special_rewards(
+                map_access_id,
+                profile.template_id,
+                (definition.template_id for definition in listed_rewards),
+                generator,
+                force_drops=force_drops,
+            )
+            for template_id in special_reward_ids:
+                reward_row = database.items_by_id.get(template_id)
+                if reward_row is None:
+                    continue
+                reward = _loot_definition_from_row(reward_row)
+                specifications.append((
+                    reward,
+                    1,
+                    equipment_item_level,
+                    "",
+                    _rarity_index(reward_row.get("DefaultRarity"), 0),
                 ))
 
             gem_bounds = next((
@@ -2782,6 +2891,37 @@ def generate_monster_loot(
                 "",
                 EQUIPMENT_RARITIES.index(rarity_name)
                 if rarity_name in EQUIPMENT_RARITIES else 0,
+            ))
+
+        # Members-only Mystic Cube: one independent flat roll per kill. The
+        # tier follows the runtime difficulty, never the drop-rate curve.
+        if member_mystic_cube_eligible and (
+            force_drops
+            or generator.random() < cube_drop_chance(map_difficulty)
+        ):
+            cube_template = mystic_cube_template_for_difficulty(
+                map_difficulty
+            )
+            cube_row = database.items_by_id.get(cube_template)
+            if cube_row is None:
+                raise ValueError(
+                    f"mystic cube {cube_template!r} is not an item"
+                )
+            cube_rarity = str(
+                cube_row.get("DefaultRarity") or "Common"
+            )
+            specifications.append((
+                LootItemDefinition(
+                    cube_template,
+                    "LootGenItem",
+                    str(cube_row.get("AutoPickUp") or "None"),
+                    "0", "0", "",
+                ),
+                1,
+                1,
+                "",
+                EQUIPMENT_RARITIES.index(cube_rarity)
+                if cube_rarity in EQUIPMENT_RARITIES else 0,
             ))
 
         # Apply the database's map-difficulty stack curve in one final pass so

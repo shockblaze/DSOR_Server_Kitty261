@@ -99,6 +99,8 @@ KINGSCITY_MAP_ID = "a0200_kingscity"
 PARALLEL_WORLDS_HUB_MAP_ID = "pw000_hub"
 TUTORIAL_DUNGEON_MAP_ID = "a0001_start_tutorial_dun"
 TUTORIAL_CULTIST_EVENT_FLAG = "a0001_start_dun_undead_mage_01"
+CRAFTING_DUNGEON_MAP_ID = "b1205_crafting_dun"
+CRAFTING_DUNGEON_LEADER_PRESENT_FLAG = "server_b1205_crafting_leader_present"
 BASELINE_MAP_EVENT_FLAGS = {
     # These are permanent account/world unlocks on the local development
     # realm, not rotating game events.  Keeping them explicit makes Gnob,
@@ -115,6 +117,10 @@ BASELINE_MAP_EVENT_FLAGS = {
     # event set. Enable it on every entry so the stone is present before the
     # client renders the map's interactive objects.
     "g0001_beach_01_dun": frozenset({"g0001_travelstone"}),
+    # The Glowing Cave entrance is authored on the crafting hub behind this
+    # permanent map-local event. Keep the portal visible by default; its
+    # Broken Multitool access requirement remains defined by the map data.
+    "b1200_hub": frozenset({"b1200_activate_exit_to_b1205"}),
     # The classic Parallel Worlds hub authors each chapter portal behind a
     # permanent, map-local EventSet. Keep all of those entrances available
     # alongside Grimmagstone so every chapter can be played through locally.
@@ -1037,9 +1043,17 @@ _TIERED_MAP_EXIT_TARGET_GROUPS = {
     "f4202_dun": ("f4203_boss", "f4203_boss_scale"),
     "a0202_kingscrypt01": ("a0203_kingscrypt02",),
     "a0203_kingscrypt02": ("a0202_kingscrypt01", "a0204_boss"),
+    "a0204_boss": ("a0203_kingscrypt02",),
     # Duria's cult-tower route also authors one scene exit per difficulty.
     "a0402_culttower01": ("a0403_culttower02",),
     "a0403_culttower02": ("a0402_culttower01", "a0404_culttower03"),
+    "a0404_culttower03": ("a0403_culttower02",),
+    # Eternal Grove and Bearach boss clearing.
+    "a0406_dun": ("a0407_boss",),
+    "a0407_boss": ("a0406_dun",),
+    # Rootrock Cavern and Arachna boss lair.
+    "a0503_dun": ("a0506_boss",),
+    "a0506_boss": ("a0503_dun",),
     # Tegan's Wall, Tegansruh, and the dragon lair have separate exits for
     # each access difficulty, including the return route to Tegan's Refuge.
     "a0505_dun": ("a0600_dragonfortress",),
@@ -1063,6 +1077,9 @@ _TIERED_MAP_EXIT_TARGET_GROUPS = {
     # Time Rift and Atlantis Above Water also author matching exits per tier.
     "c2302_dun": ("c2303_dun",),
     "c2303_dun": ("c2302_dun", "c2304_boss"),
+    "c2304_boss": ("c2303_dun",),
+    "a0604_heraldsslair": ("a0603_dragonslair02",),
+    "f4203_boss": ("f4202_dun",),
     # The Spiky Valley treasure-cave gate has one overlapping scene exit per
     # difficulty. Only expose the exit matching the current Valley access.
     "h0006_valley_dun": ("h0007_treasure_cave_dun",),
@@ -1489,10 +1506,17 @@ _NATIVE_SCENE_EXIT_TARGETS = {
     "f4201_pve": ("f4102_dun",),
     # The boss teleportarium exits are authored but missing from the scene.
     "f4202_dun": ("f4203_boss",),
+    "f4203_boss": ("f4202_dun",),
     "a0202_kingscrypt01": ("a0203_kingscrypt02",),
     "a0203_kingscrypt02": ("a0202_kingscrypt01", "a0204_boss"),
+    "a0204_boss": ("a0203_kingscrypt02",),
     "a0402_culttower01": ("a0403_culttower02",),
     "a0403_culttower02": ("a0402_culttower01", "a0404_culttower03"),
+    "a0404_culttower03": ("a0403_culttower02",),
+    "a0406_dun": ("a0407_boss",),
+    "a0407_boss": ("a0406_dun",),
+    "a0503_dun": ("a0506_boss",),
+    "a0506_boss": ("a0503_dun",),
     "a0505_dun": ("a0600_dragonfortress",),
     "a0600_dragonfortress": (
         "a0505_dun",
@@ -1514,6 +1538,8 @@ _NATIVE_SCENE_EXIT_TARGETS = {
     "c2310_boss": ("c2301_dun",),
     "c2302_dun": ("c2303_dun",),
     "c2303_dun": ("c2302_dun", "c2304_boss"),
+    "c2304_boss": ("c2303_dun",),
+    "a0604_heraldsslair": ("a0603_dragonslair02",),
 }
 
 
