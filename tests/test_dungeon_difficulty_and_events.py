@@ -6,7 +6,8 @@ import pytest
 from dso_server.gameplay import dungeon_elites
 from dso_server.gameplay.dungeon_elites import elite_targets
 from dso_server.gameplay.local_monster_state import (
-    clear_monster_encounter_cache, load_local_monster_encounter,
+    SPAWN_AREA_MAX_TOTAL_MONSTERS, clear_monster_encounter_cache,
+    load_local_monster_encounter,
 )
 from dso_server.paths import DEFAULT_STATIC_DB_PATH
 from dso_server.protocol.gameplay_protocol import NewMonsterServerCommand
@@ -75,8 +76,9 @@ def test_dungeon_elite_ranks_match_configured_counts(diff):
     assert ranks["Rank_champion"] == targets["champions"]
     assert ranks["Rank_guardian"] == targets["guardians"]
 
-    # Total monsters should remain roughly consistent without overflowing
-    assert 140 <= len(monsters) <= 200
+    # Total monsters should remain roughly consistent without overflowing.
+    # Local: the whole-map cap is 120 here (upstream 162), so the floor follows it.
+    assert min(140, SPAWN_AREA_MAX_TOTAL_MONSTERS) <= len(monsters) <= 200
 
 
 def test_dungeon_elite_counts_are_monotonically_increasing():
